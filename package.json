@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "npm run validate:env && next start",
     "validate:env": "node scripts/validate-env.mjs",
     "verify:openai": "node scripts/verify-openai-access.mjs",
     "smoke:upload": "node scripts/smoke-upload.mjs",

@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+
+.git
+.next
+coverage
+node_modules
+npm-debug.log*
+playwright-report
+test-results
+tsconfig.tsbuildinfo
+
+.DS_Store
+Thumbs.db

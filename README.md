@@ -22,12 +22,13 @@ Secure full-stack speech-to-text app built with Next.js, React, TypeScript, and 
 
 ## Secure Key Setup
 
-An approved Codex/OpenAI API-key creation tool was not available in this session. Create a project-scoped OpenAI Platform key named `production-stt-app` manually or through your approved organization secret workflow, then install it as a server-only secret:
+The Codex OpenAI Platform API-key setup connector is installed, but it required reauthentication during this setup session before it could create a key. Create a project-scoped OpenAI Platform key named `production-stt-app` manually or through your approved organization secret workflow, then install it as a server-only secret:
 
 1. Create the key in the OpenAI Platform API key settings for the intended project.
 2. Store it as `OPENAI_API_KEY` in your deployment secret store.
 3. For local development only, place it in `.env.local`.
 4. Do not commit `.env.local`; it is ignored by `.gitignore`.
+5. Reauthenticate the OpenAI Platform connector in Codex if you want Codex to create the key through the approved encrypted setup flow later.
 
 The app never prints, logs, or exposes the raw key. `npm run validate:env` checks only that `OPENAI_API_KEY` is present and key-shaped. `npm run verify:openai` checks whether the configured project can see the configured STT models.
 
@@ -75,6 +76,7 @@ Defaults are centralized in `src/lib/constants.ts` and can be overridden through
 - OpenAI calls run server-side. The browser sends WebRTC SDP offers to the server, and the server exchanges them with OpenAI.
 - Logs exclude raw audio, full transcripts, tokens, keys, and secrets.
 - The API includes request size checks, MIME/extension validation, rate limiting, timeouts, structured errors, and a healthcheck.
+- Docker builds exclude local `.env*` files through `.dockerignore`; pass secrets only at runtime.
 
 ## Deployment
 
@@ -82,7 +84,7 @@ Defaults are centralized in `src/lib/constants.ts` and can be overridden through
 
 1. Build with `npm ci && npm run build`.
 2. Set `OPENAI_API_KEY` in the host secret manager.
-3. Run `npm run validate:env && npm run verify:openai && npm start`.
+3. Run `npm run verify:openai && npm start`; `npm start` validates `OPENAI_API_KEY` before serving.
 4. Ensure the host supports outbound HTTPS to OpenAI.
 
 ### Vercel-Style Hosting

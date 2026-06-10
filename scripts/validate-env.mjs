@@ -1,5 +1,6 @@
-import { loadEnvConfig } from '@next/env';
+import nextEnv from '@next/env';
 
+const { loadEnvConfig } = nextEnv;
 loadEnvConfig(process.cwd());
 
 const key = process.env.OPENAI_API_KEY;

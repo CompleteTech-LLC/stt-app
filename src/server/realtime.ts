@@ -17,6 +17,25 @@ type RealtimeClientSecretResponse = {
   expires_at?: number;
 };
 
+const parseOpenAIError = (body: string): { message?: string; code?: string } => {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: {
+        message?: string;
+        code?: string;
+        type?: string;
+      };
+    };
+
+    return {
+      message: parsed.error?.message,
+      code: parsed.error?.code || parsed.error?.type
+    };
+  } catch {
+    return {};
+  }
+};
+
 export const createRealtimeClientSecret = async (input: RealtimeInput) => {
   const config = getServerConfig();
   const apiKey = requireOpenAIKey(config);
@@ -120,13 +139,18 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
     const body = await response.text();
 
     if (!response.ok) {
+      const upstream = parseOpenAIError(body);
       throw new AppError(
         'UPSTREAM_ERROR',
         response.status === 401
           ? 'OpenAI rejected the server API key.'
-          : `Could not establish realtime transcription session. OpenAI returned HTTP ${response.status}.`,
+          : `Could not establish realtime transcription session. OpenAI returned HTTP ${
+              response.status
+            }${upstream.message ? `: ${upstream.message}` : '.'}`,
         response.status === 401 ? 503 : 502,
-        response.status >= 500
+        response.status >= 500,
+        response.status,
+        upstream.code
       );
     }
 

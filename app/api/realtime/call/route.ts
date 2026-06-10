@@ -47,7 +47,9 @@ export async function POST(request: NextRequest) {
     logger.error('realtime_call_failed', {
       code: appError.code,
       status: appError.status,
-      retryable: appError.retryable
+      retryable: appError.retryable,
+      upstreamStatus: appError.upstreamStatus,
+      upstreamCode: appError.upstreamCode
     });
 
     return NextResponse.json(errorResponseBody(appError), { status: appError.status });

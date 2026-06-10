@@ -237,7 +237,7 @@ export function SttApp() {
       );
 
       if (!answer.ok) {
-        throw new Error('Realtime WebRTC connection failed.');
+        throw new Error(await readApiError(answer));
       }
 
       await pc.setRemoteDescription({ type: 'answer', sdp: await answer.text() });

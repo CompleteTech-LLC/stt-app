@@ -15,7 +15,9 @@ export class AppError extends Error {
     public readonly code: ErrorCode,
     message: string,
     public readonly status = 500,
-    public readonly retryable = false
+    public readonly retryable = false,
+    public readonly upstreamStatus?: number,
+    public readonly upstreamCode?: string
   ) {
     super(message);
     this.name = 'AppError';
@@ -67,6 +69,8 @@ export const errorResponseBody = (error: AppError) => ({
   error: {
     code: error.code,
     message: error.message,
-    retryable: error.retryable
+    retryable: error.retryable,
+    upstreamStatus: error.upstreamStatus,
+    upstreamCode: error.upstreamCode
   }
 });

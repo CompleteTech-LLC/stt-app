@@ -43,5 +43,8 @@
     "typescript": "latest",
     "typescript-eslint": "latest",
     "vitest": "latest"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
   }
 }

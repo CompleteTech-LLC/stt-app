@@ -50,6 +50,7 @@ npm run build
 npm start
 npm run validate:env
 npm run verify:openai
+npm run smoke:upload
 npm run lint
 npm run format
 npm run typecheck
@@ -97,6 +98,7 @@ Realtime WebRTC requires browser microphone permission and network access to `ht
 
 - Missing key: API routes return a structured `MISSING_API_KEY` error and production startup validation fails safely.
 - Key present but transcription fails: run `npm run verify:openai`. A key can be present while the project still lacks active billing, model allowlist access, or permission to use the configured STT models.
+- Upload route smoke test: with the dev or production server running, run `npm run smoke:upload`. It sends a tiny generated WAV through `/api/transcribe` and reports sanitized status/error metadata.
 - Unsupported file: check file type, extension, and size.
 - Realtime fails before connecting: check that the OpenAI project has active billing and access to `gpt-realtime-whisper`. Local recording fallback is used only for browser/network microphone failures, not server-side OpenAI access failures.
 - OpenAI HTTP 500 during realtime setup: confirm the project has active billing and access to the configured realtime transcription model. A configured key is not enough if the project is not active for paid API usage.

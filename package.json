@@ -9,6 +9,7 @@
     "start": "next start",
     "validate:env": "node scripts/validate-env.mjs",
     "verify:openai": "node scripts/verify-openai-access.mjs",
+    "smoke:upload": "node scripts/smoke-upload.mjs",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --check .",
     "format:write": "prettier --write .",

@@ -24,6 +24,27 @@ export class AppError extends Error {
   }
 }
 
+const getString = (value: unknown) => (typeof value === 'string' ? value : undefined);
+
+const getOpenAIErrorDetails = (error: Error) => {
+  const candidate = error as {
+    status?: number;
+    code?: string;
+    type?: string;
+    error?: {
+      code?: string;
+      type?: string;
+      message?: string;
+    };
+  };
+
+  return {
+    status: candidate.status,
+    code: candidate.code || candidate.type || candidate.error?.code || candidate.error?.type,
+    message: getString(candidate.error?.message) || getString(error.message)
+  };
+};
+
 export const toAppError = (error: unknown): AppError => {
   if (error instanceof AppError) return error;
 
@@ -49,15 +70,20 @@ export const toAppError = (error: unknown): AppError => {
       );
     }
 
-    const maybeStatus = (error as { status?: number }).status;
+    const upstream = getOpenAIErrorDetails(error);
+    const maybeStatus = upstream.status;
     if (maybeStatus && maybeStatus >= 400) {
       return new AppError(
         'UPSTREAM_ERROR',
         maybeStatus === 401
           ? 'OpenAI rejected the server API key.'
-          : 'OpenAI transcription service returned an error.',
+          : upstream.message
+            ? `OpenAI transcription service returned HTTP ${maybeStatus}: ${upstream.message}`
+            : `OpenAI transcription service returned HTTP ${maybeStatus}.`,
         maybeStatus === 401 ? 503 : 502,
-        maybeStatus >= 500
+        maybeStatus >= 500,
+        maybeStatus,
+        upstream.code
       );
     }
   }

@@ -42,8 +42,23 @@ type ApiError = {
     code?: string;
     message?: string;
     retryable?: boolean;
+    upstreamStatus?: number;
+    upstreamCode?: string;
   };
 };
+
+class ApiFailure extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly retryable?: boolean,
+    public readonly upstreamStatus?: number,
+    public readonly upstreamCode?: string
+  ) {
+    super(message);
+    this.name = 'ApiFailure';
+  }
+}
 
 const emptyTranscript: TranscriptDocument = {
   text: '',
@@ -54,10 +69,24 @@ const emptyTranscript: TranscriptDocument = {
 
 const acceptedAttribute = [...acceptedMimeTypes, ...acceptedExtensions].join(',');
 
-const readApiError = async (response: Response) => {
+const readApiFailure = async (response: Response) => {
   const body = (await response.json().catch(() => ({}))) as ApiError;
-  return body.error?.message || `Request failed with HTTP ${response.status}.`;
+  return new ApiFailure(
+    body.error?.message || `Request failed with HTTP ${response.status}.`,
+    body.error?.code,
+    body.error?.retryable,
+    body.error?.upstreamStatus,
+    body.error?.upstreamCode
+  );
 };
+
+const shouldAttemptLocalRecordingFallback = (error: unknown) =>
+  !(
+    error instanceof ApiFailure &&
+    ['MISSING_API_KEY', 'UPSTREAM_ERROR', 'CONFIGURATION_ERROR', 'RATE_LIMITED'].includes(
+      error.code || ''
+    )
+  );
 
 const download = (name: string, contents: string, type: string) => {
   const blob = new Blob([contents], { type });
@@ -153,7 +182,7 @@ export function SttApp() {
       body.set('model', fileModel);
 
       const response = await fetch('/api/transcribe', { method: 'POST', body });
-      if (!response.ok) throw new Error(await readApiError(response));
+      if (!response.ok) throw await readApiFailure(response);
       const data = (await response.json()) as { transcript: TranscriptDocument };
       setTranscript(data.transcript);
     },
@@ -237,7 +266,7 @@ export function SttApp() {
       );
 
       if (!answer.ok) {
-        throw new Error(await readApiError(answer));
+        throw await readApiFailure(answer);
       }
 
       await pc.setRemoteDescription({ type: 'answer', sdp: await answer.text() });
@@ -250,12 +279,16 @@ export function SttApp() {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Realtime transcription is unavailable.';
-      if (streamRef.current && typeof MediaRecorder !== 'undefined') {
+      if (
+        streamRef.current &&
+        typeof MediaRecorder !== 'undefined' &&
+        shouldAttemptLocalRecordingFallback(error)
+      ) {
         startFallbackRecorder(streamRef.current, message);
         return;
       }
       setLiveError(
-        `${message} Use File Upload or check microphone permissions and server configuration.`
+        `${message} Check OpenAI billing/model access and restart the app after updating server-side secrets.`
       );
       setLiveState('error');
       stopMedia();
@@ -308,7 +341,7 @@ export function SttApp() {
 
       setUploadState('uploading');
       const response = await fetch('/api/transcribe', { method: 'POST', body });
-      if (!response.ok) throw new Error(await readApiError(response));
+      if (!response.ok) throw await readApiFailure(response);
 
       const data = (await response.json()) as { transcript: TranscriptDocument };
       setTranscript(data.transcript);

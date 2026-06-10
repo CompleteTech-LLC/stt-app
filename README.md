@@ -70,7 +70,7 @@ Defaults are centralized in `src/lib/constants.ts` and can be overridden through
 
 - Audio is sent to OpenAI for transcription.
 - Audio and transcripts are not stored by this app by default.
-- OpenAI calls run server-side except the browser WebRTC call, which uses only a short-lived realtime client secret.
+- OpenAI calls run server-side. The browser sends WebRTC SDP offers to the server, and the server exchanges them with OpenAI.
 - Logs exclude raw audio, full transcripts, tokens, keys, and secrets.
 - The API includes request size checks, MIME/extension validation, rate limiting, timeouts, structured errors, and a healthcheck.
 
@@ -96,6 +96,7 @@ Realtime WebRTC requires browser microphone permission and network access to `ht
 
 - Missing key: API routes return a structured `MISSING_API_KEY` error and production startup validation fails safely.
 - Unsupported file: check file type, extension, and size.
-- Realtime fails: the UI falls back to local tab recording and transcribes after Stop when possible.
+- Realtime fails before connecting: check that the OpenAI project has active billing and access to `gpt-realtime-whisper`. Local recording fallback is used only for browser/network microphone failures, not server-side OpenAI access failures.
+- OpenAI HTTP 500 during realtime setup: confirm the project has active billing and access to the configured realtime transcription model. A configured key is not enough if the project is not active for paid API usage.
 - Long files: shorten or compress the file, then retry.
 - Upstream failures: retry later or switch file mode to `gpt-4o-transcribe` for accuracy-sensitive jobs.

@@ -144,9 +144,9 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
         'UPSTREAM_ERROR',
         response.status === 401
           ? 'OpenAI rejected the server API key.'
-          : `Could not establish realtime transcription session. OpenAI returned HTTP ${
-              response.status
-            }${upstream.message ? `: ${upstream.message}` : '.'}`,
+          : upstream.message
+            ? `Could not establish realtime transcription session. OpenAI returned HTTP ${response.status}: ${upstream.message}`
+            : `Could not establish realtime transcription session. OpenAI returned HTTP ${response.status}. Verify the OpenAI project has active billing and access to realtime transcription.`,
         response.status === 401 ? 503 : 502,
         response.status >= 500,
         response.status,

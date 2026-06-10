@@ -28,3 +28,32 @@ test('upload mode sends a file and displays transcript text', async ({ page }) =
 
   await expect(page.getByLabel('Transcript text')).toHaveValue('Mocked upload transcript.');
 });
+
+test('live mode does not start local recording fallback for server-side OpenAI failures', async ({
+  context,
+  page
+}) => {
+  await context.grantPermissions(['microphone']);
+  await page.route('**/api/realtime/call**', async (route) => {
+    await route.fulfill({
+      status: 502,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: {
+          code: 'UPSTREAM_ERROR',
+          message:
+            'Could not establish realtime transcription session. OpenAI returned HTTP 500. Verify the OpenAI project has active billing and access to realtime transcription.',
+          retryable: true,
+          upstreamStatus: 500
+        }
+      })
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Start$/ }).click();
+
+  await expect(page.getByText(/^error$/i)).toBeVisible();
+  await expect(page.getByText(/Verify the OpenAI project has active billing/)).toBeVisible();
+  await expect(page.getByText(/Recording locally in this tab/)).toHaveCount(0);
+});

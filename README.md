@@ -29,7 +29,7 @@ An approved Codex/OpenAI API-key creation tool was not available in this session
 3. For local development only, place it in `.env.local`.
 4. Do not commit `.env.local`; it is ignored by `.gitignore`.
 
-The app never prints, logs, or exposes the raw key. `npm run validate:env` checks only that `OPENAI_API_KEY` is present and key-shaped.
+The app never prints, logs, or exposes the raw key. `npm run validate:env` checks only that `OPENAI_API_KEY` is present and key-shaped. `npm run verify:openai` checks whether the configured project can see the configured STT models.
 
 ## Setup
 
@@ -49,6 +49,7 @@ npm run dev
 npm run build
 npm start
 npm run validate:env
+npm run verify:openai
 npm run lint
 npm run format
 npm run typecheck
@@ -80,7 +81,7 @@ Defaults are centralized in `src/lib/constants.ts` and can be overridden through
 
 1. Build with `npm ci && npm run build`.
 2. Set `OPENAI_API_KEY` in the host secret manager.
-3. Run `npm run validate:env && npm start`.
+3. Run `npm run validate:env && npm run verify:openai && npm start`.
 4. Ensure the host supports outbound HTTPS to OpenAI.
 
 ### Vercel-Style Hosting
@@ -95,6 +96,7 @@ Realtime WebRTC requires browser microphone permission and network access to `ht
 ## Troubleshooting
 
 - Missing key: API routes return a structured `MISSING_API_KEY` error and production startup validation fails safely.
+- Key present but transcription fails: run `npm run verify:openai`. A key can be present while the project still lacks active billing, model allowlist access, or permission to use the configured STT models.
 - Unsupported file: check file type, extension, and size.
 - Realtime fails before connecting: check that the OpenAI project has active billing and access to `gpt-realtime-whisper`. Local recording fallback is used only for browser/network microphone failures, not server-side OpenAI access failures.
 - OpenAI HTTP 500 during realtime setup: confirm the project has active billing and access to the configured realtime transcription model. A configured key is not enough if the project is not active for paid API usage.

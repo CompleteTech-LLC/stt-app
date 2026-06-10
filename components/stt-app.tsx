@@ -197,17 +197,6 @@ export function SttApp() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const sessionResponse = await fetch('/api/realtime/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ language, delay: 'low' })
-      });
-
-      if (!sessionResponse.ok) {
-        throw new Error(await readApiError(sessionResponse));
-      }
-
-      const session = (await sessionResponse.json()) as { clientSecret: string; model: string };
       const pc = new RTCPeerConnection();
       peerConnectionRef.current = pc;
 
@@ -236,14 +225,16 @@ export function SttApp() {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      const answer = await fetch('https://api.openai.com/v1/realtime/calls', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${session.clientSecret}`,
-          'Content-Type': 'application/sdp'
-        },
-        body: offer.sdp || ''
-      });
+      const answer = await fetch(
+        `/api/realtime/call?language=${encodeURIComponent(language)}&delay=low`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/sdp'
+          },
+          body: offer.sdp || ''
+        }
+      );
 
       if (!answer.ok) {
         throw new Error('Realtime WebRTC connection failed.');
@@ -253,7 +244,7 @@ export function SttApp() {
       setTranscript((current) => ({
         ...current,
         language,
-        model: session.model,
+        model: sttModels.realtime,
         createdAt: current.createdAt || new Date().toISOString()
       }));
     } catch (error) {

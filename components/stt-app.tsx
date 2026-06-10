@@ -32,6 +32,7 @@ import {
   hasTimestamps,
   type TranscriptDocument
 } from '@/src/lib/transcriptExport';
+import { appendRealtimeDelta, joinTranscriptText } from '@/src/lib/liveTranscript';
 
 type Mode = 'live' | 'upload';
 type UploadState = 'idle' | 'validating' | 'uploading' | 'done' | 'error';
@@ -142,6 +143,7 @@ export function SttApp() {
   const fallbackChunksRef = useRef<Blob[]>([]);
 
   const transcriptText = transcript.text;
+  const displayedTranscriptText = joinTranscriptText(transcriptText, partial);
   const canExportTimed = hasTimestamps(transcript);
 
   const fileHelp = useMemo(
@@ -243,7 +245,8 @@ export function SttApp() {
           const parsed = JSON.parse(message.data as string) as Record<string, unknown>;
           const update = extractRealtimeText(parsed);
           if (!update) return;
-          if (update.kind === 'partial') setPartial(update.text);
+          if (update.kind === 'partial')
+            setPartial((current) => appendRealtimeDelta(current, update.text));
           else applyFinalText(update.text);
         } catch {
           // Realtime data channel can include events not needed by this UI.
@@ -302,10 +305,13 @@ export function SttApp() {
       return;
     }
 
+    if (partial.trim()) {
+      applyFinalText(partial);
+    }
     stopMedia();
     setPartial('');
     setLiveState('stopped');
-  }, [stopMedia]);
+  }, [applyFinalText, partial, stopMedia]);
 
   const validateClientFile = (candidate: File) => {
     if (candidate.size > appLimits.maxUploadBytes) {
@@ -448,11 +454,6 @@ export function SttApp() {
                   Retry
                 </button>
               </div>
-              {partial ? (
-                <div className="partial" aria-live="polite">
-                  {partial}
-                </div>
-              ) : null}
               {liveError ? <p className="error">{liveError}</p> : null}
             </div>
           ) : (
@@ -527,8 +528,8 @@ export function SttApp() {
                 type="button"
                 title="Copy transcript"
                 aria-label="Copy transcript"
-                onClick={() => navigator.clipboard.writeText(transcriptText)}
-                disabled={!transcriptText}
+                onClick={() => navigator.clipboard.writeText(displayedTranscriptText)}
+                disabled={!displayedTranscriptText}
               >
                 <Clipboard size={18} aria-hidden />
               </button>
@@ -541,21 +542,28 @@ export function SttApp() {
           <textarea
             className="transcript"
             aria-label="Transcript text"
-            value={transcriptText}
+            value={displayedTranscriptText}
             placeholder="Transcript text appears here. You can edit it before copying or exporting."
-            onChange={(event) =>
+            onChange={(event) => {
               setTranscript((current) => ({
                 ...current,
                 text: event.target.value
-              }))
-            }
+              }));
+              setPartial('');
+            }}
           />
 
           <div className="export-row" aria-label="Export transcript">
             <button
               type="button"
-              onClick={() => download('transcript.txt', exportTxt(transcript), 'text/plain')}
-              disabled={!transcriptText}
+              onClick={() =>
+                download(
+                  'transcript.txt',
+                  exportTxt({ ...transcript, text: displayedTranscriptText }),
+                  'text/plain'
+                )
+              }
+              disabled={!displayedTranscriptText}
             >
               <Download size={17} aria-hidden />
               TXT
@@ -563,9 +571,13 @@ export function SttApp() {
             <button
               type="button"
               onClick={() =>
-                download('transcript.json', exportJson(transcript), 'application/json')
+                download(
+                  'transcript.json',
+                  exportJson({ ...transcript, text: displayedTranscriptText }),
+                  'application/json'
+                )
               }
-              disabled={!transcriptText}
+              disabled={!displayedTranscriptText}
             >
               <Download size={17} aria-hidden />
               JSON

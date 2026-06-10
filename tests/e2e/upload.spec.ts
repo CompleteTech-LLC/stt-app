@@ -35,6 +35,7 @@ test('live mode does not start local recording fallback for server-side OpenAI f
 }) => {
   await context.grantPermissions(['microphone']);
   await page.route('**/api/realtime/call**', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
     await route.fulfill({
       status: 502,
       contentType: 'application/json',
@@ -53,7 +54,8 @@ test('live mode does not start local recording fallback for server-side OpenAI f
   await page.goto('/');
   await page.getByRole('button', { name: /^Start$/ }).click();
 
-  await expect(page.getByText(/^error$/i)).toBeVisible();
+  await expect(page.getByText(/Opening the secure realtime transcription session/)).toBeVisible();
+  await expect(page.getByText(/^Realtime unavailable$/i)).toBeVisible();
   await expect(page.getByText(/Verify the OpenAI project has active billing/)).toBeVisible();
   await expect(page.getByText(/Recording locally in this tab/)).toHaveCount(0);
 });

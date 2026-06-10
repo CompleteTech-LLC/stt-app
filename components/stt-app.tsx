@@ -36,7 +36,15 @@ import { appendRealtimeDelta, joinTranscriptText } from '@/src/lib/liveTranscrip
 
 type Mode = 'live' | 'upload';
 type UploadState = 'idle' | 'validating' | 'uploading' | 'done' | 'error';
-type LiveState = 'idle' | 'connecting' | 'live' | 'fallback-recording' | 'stopped' | 'error';
+type LiveState =
+  | 'idle'
+  | 'requesting-mic'
+  | 'connecting'
+  | 'live'
+  | 'fallback-recording'
+  | 'fallback-transcribing'
+  | 'stopped'
+  | 'error';
 
 type ApiError = {
   error?: {
@@ -69,6 +77,41 @@ const emptyTranscript: TranscriptDocument = {
 };
 
 const acceptedAttribute = [...acceptedMimeTypes, ...acceptedExtensions].join(',');
+
+const liveStatusCopy: Record<LiveState, { label: string; detail: string }> = {
+  idle: {
+    label: 'Ready',
+    detail: 'Press Start to request microphone access and open realtime transcription.'
+  },
+  'requesting-mic': {
+    label: 'Requesting microphone',
+    detail: 'Waiting for browser microphone permission.'
+  },
+  connecting: {
+    label: 'Connecting',
+    detail: 'Opening the secure realtime transcription session.'
+  },
+  live: {
+    label: 'Listening',
+    detail: 'Realtime transcript updates are streaming into the workspace.'
+  },
+  'fallback-recording': {
+    label: 'Recording locally',
+    detail: 'Realtime is unavailable. Audio will be transcribed after Stop.'
+  },
+  'fallback-transcribing': {
+    label: 'Transcribing recording',
+    detail: 'Uploading the local recording for server-side transcription.'
+  },
+  stopped: {
+    label: 'Stopped',
+    detail: 'Start again when you are ready for another capture.'
+  },
+  error: {
+    label: 'Realtime unavailable',
+    detail: 'Review the error below, then retry when ready.'
+  }
+};
 
 const readApiFailure = async (response: Response) => {
   const body = (await response.json().catch(() => ({}))) as ApiError;
@@ -145,6 +188,7 @@ export function SttApp() {
   const transcriptText = transcript.text;
   const displayedTranscriptText = joinTranscriptText(transcriptText, partial);
   const canExportTimed = hasTimestamps(transcript);
+  const liveStatus = liveStatusCopy[liveState];
 
   const fileHelp = useMemo(
     () =>
@@ -200,7 +244,7 @@ export function SttApp() {
       };
       recorder.onstop = async () => {
         try {
-          setLiveState('connecting');
+          setLiveState('fallback-transcribing');
           const blob = new Blob(fallbackChunksRef.current, { type: 'audio/webm' });
           await transcribeFallbackRecording(blob);
           setLiveState('stopped');
@@ -222,11 +266,12 @@ export function SttApp() {
   const startLive = useCallback(async () => {
     setLiveError('');
     setPartial('');
-    setLiveState('connecting');
+    setLiveState('requesting-mic');
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
+      setLiveState('connecting');
 
       const pc = new RTCPeerConnection();
       peerConnectionRef.current = pc;
@@ -420,36 +465,58 @@ export function SttApp() {
           {mode === 'live' ? (
             <div className="mode-body">
               <div className={`state-row ${liveState}`}>
-                <Radio size={18} aria-hidden />
-                <span>{liveState.replace('-', ' ')}</span>
+                {['requesting-mic', 'connecting', 'fallback-transcribing'].includes(liveState) ? (
+                  <Loader2 className="spin" size={18} aria-hidden />
+                ) : (
+                  <Radio size={18} aria-hidden />
+                )}
+                <span>{liveStatus.label}</span>
               </div>
+              <p className="state-detail" aria-live="polite">
+                {liveStatus.detail}
+              </p>
               <div className="button-row">
                 <button
                   className="primary"
                   type="button"
                   onClick={startLive}
                   disabled={
+                    liveState === 'requesting-mic' ||
                     liveState === 'connecting' ||
                     liveState === 'live' ||
-                    liveState === 'fallback-recording'
+                    liveState === 'fallback-recording' ||
+                    liveState === 'fallback-transcribing'
                   }
                 >
-                  {liveState === 'connecting' ? (
+                  {['requesting-mic', 'connecting'].includes(liveState) ? (
                     <Loader2 className="spin" size={18} />
                   ) : (
                     <Mic size={18} />
                   )}
-                  Start
+                  {['requesting-mic', 'connecting'].includes(liveState) ? 'Starting' : 'Start'}
                 </button>
                 <button
                   type="button"
                   onClick={stopLive}
-                  disabled={!['live', 'fallback-recording', 'connecting'].includes(liveState)}
+                  disabled={
+                    !['live', 'fallback-recording', 'requesting-mic', 'connecting'].includes(
+                      liveState
+                    )
+                  }
                 >
                   <PauseCircle size={18} aria-hidden />
                   Stop
                 </button>
-                <button type="button" onClick={startLive} disabled={liveState === 'live'}>
+                <button
+                  type="button"
+                  onClick={startLive}
+                  disabled={
+                    liveState === 'live' ||
+                    liveState === 'requesting-mic' ||
+                    liveState === 'connecting' ||
+                    liveState === 'fallback-transcribing'
+                  }
+                >
                   <RotateCcw size={18} aria-hidden />
                   Retry
                 </button>

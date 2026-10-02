@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/banner.jpg" alt="A microphone and audio waveform flowing into a transcript document, a file upload tray and a shielded secure server, in teal and amber on midnight navy." width="100%"></p>
+
 # Signal STT
 
 Secure full-stack speech-to-text app built with Next.js, React, TypeScript, and server-side OpenAI API calls.

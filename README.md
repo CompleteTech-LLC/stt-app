@@ -2,7 +2,9 @@
 
 # Signal STT
 
-Secure full-stack speech-to-text app built with Next.js, React, TypeScript, and server-side OpenAI API calls.
+Secure full-stack speech-to-text app built with Next.js, React, TypeScript, and server-side OpenAI API calls. It is for developers who want a small, self-hosted transcription UI (live microphone or file upload) that keeps the OpenAI API key on the server.
+
+Status: early prototype (version 0.1.0, not published as a package). It needs your own OpenAI API key and a project with access to the configured transcription models. To try it, see [Setup](#setup).
 
 ## Overview
 
@@ -24,13 +26,12 @@ Secure full-stack speech-to-text app built with Next.js, React, TypeScript, and 
 
 ## Secure Key Setup
 
-The Codex OpenAI Platform API-key setup connector is installed, but it required reauthentication during this setup session before it could create a key. Create a project-scoped OpenAI Platform key named `production-stt-app` manually or through your approved organization secret workflow, then install it as a server-only secret:
+Create a project-scoped OpenAI Platform API key (this repo uses the name `production-stt-app` in examples) through your approved organization secret workflow, then install it as a server-only secret:
 
 1. Create the key in the OpenAI Platform API key settings for the intended project.
 2. Store it as `OPENAI_API_KEY` in your deployment secret store.
 3. For local development only, place it in `.env.local`.
 4. Do not commit `.env.local`; it is ignored by `.gitignore`.
-5. Reauthenticate the OpenAI Platform connector in Codex if you want Codex to create the key through the approved encrypted setup flow later.
 
 The app never prints, logs, or exposes the raw key. `npm run validate:env` checks only that `OPENAI_API_KEY` is present and key-shaped. `npm run verify:openai` checks whether the configured project can see the configured STT models.
 

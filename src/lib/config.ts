@@ -30,6 +30,8 @@ export type ServerConfig = {
   models: SttModelConfig;
   limits: LimitConfig;
   logTranscripts: boolean;
+  trustProxy: boolean;
+  safetyIdentifierSalt: string | null;
 };
 
 export const getServerConfig = (env: Env = process.env): ServerConfig => {
@@ -57,7 +59,9 @@ export const getServerConfig = (env: Env = process.env): ServerConfig => {
         appLimits.rateLimitMaxRequests
       )
     },
-    logTranscripts: env.LOG_TRANSCRIPTS === 'true' && env.NODE_ENV !== 'production'
+    logTranscripts: env.LOG_TRANSCRIPTS === 'true' && env.NODE_ENV !== 'production',
+    trustProxy: env.TRUST_PROXY?.trim().toLowerCase() === 'true',
+    safetyIdentifierSalt: env.SAFETY_IDENTIFIER_SALT?.trim() || null
   };
 };
 

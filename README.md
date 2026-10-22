@@ -109,3 +109,7 @@ Realtime WebRTC requires browser microphone permission and network access to `ht
 - OpenAI HTTP 500 during realtime setup: confirm the project has active billing and access to the configured realtime transcription model. A configured key is not enough if the project is not active for paid API usage.
 - Long files: shorten or compress the file, then retry.
 - Upstream failures: retry later or switch file mode to `gpt-4o-transcribe` for accuracy-sensitive jobs.
+
+## License
+
+Code and documentation are released under the [MIT License](LICENSE).

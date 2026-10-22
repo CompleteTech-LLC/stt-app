@@ -13,6 +13,8 @@ describe('server config', () => {
     expect(config.models.fileHighAccuracy).toBe(sttModels.fileHighAccuracy);
     expect(config.models.realtime).toBe(sttModels.realtime);
     expect(config.limits.maxUploadBytes).toBe(appLimits.maxUploadBytes);
+    expect(config.trustProxy).toBe(false);
+    expect(config.safetyIdentifierSalt).toBeNull();
   });
 
   it('supports centralized model and limit overrides', () => {

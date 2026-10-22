@@ -8,7 +8,7 @@ Status: early prototype (version 0.1.0, not published as a package). It needs yo
 
 ## Overview
 
-- Live Mic mode creates a server-side OpenAI Realtime client secret, connects the browser to the Realtime API with WebRTC, and shows partial/final transcript updates.
+- Live Mic mode sends the browser's WebRTC SDP offer to the app's own server route, which exchanges it with the OpenAI Realtime API, and shows partial/final transcript updates.
 - File Upload mode validates common audio/video files and transcribes them through a server-only API route.
 - Transcript workspace supports editing, copy, clear, TXT/JSON export, and SRT/VTT export when timestamp segments exist.
 - No persistent storage is used by default. Uploads are handled in memory and are not written to disk.
@@ -16,11 +16,12 @@ Status: early prototype (version 0.1.0, not published as a package). It needs yo
 ## Architecture
 
 - `app/api/transcribe/route.ts`: multipart upload API, size checks, rate limiting, server-side transcription.
-- `app/api/realtime/session/route.ts`: creates short-lived realtime client secrets; the raw OpenAI API key never reaches the browser.
+- `app/api/realtime/call/route.ts`: exchanges the browser's WebRTC SDP offer with OpenAI server-side; the raw OpenAI API key and no provider tokens ever reach the browser.
 - `src/lib/constants.ts`: centralized model names, MIME types, extensions, and limits.
 - `src/lib/config.ts`: server-only environment loading and startup/runtime validation helpers.
 - `src/server/fileTranscription.ts`: OpenAI Audio Transcriptions API wrapper.
-- `src/server/realtime.ts`: Realtime transcription session-secret wrapper.
+- `src/server/realtime.ts`: Realtime transcription call (SDP exchange) wrapper.
+- `src/server/rateLimit.ts`: in-memory rate limiter, client identification, and hashed safety identifiers.
 - `src/lib/transcriptExport.ts`: TXT, JSON, SRT, and VTT export helpers.
 - `components/stt-app.tsx`: Live Mic, File Upload, and transcript workspace UI.
 
@@ -80,6 +81,17 @@ Defaults are centralized in `src/lib/constants.ts` and can be overridden through
 - Logs exclude raw audio, full transcripts, tokens, keys, and secrets.
 - The API includes request size checks, MIME/extension validation, rate limiting, timeouts, structured errors, and a healthcheck.
 - Docker builds exclude local `.env*` files through `.dockerignore`; pass secrets only at runtime.
+- **There is no user authentication.** Anyone who can reach the app can spend your OpenAI quota. Do not expose it publicly without putting it behind an authenticating reverse proxy, VPN, or similar access control.
+
+### Rate limiting and proxies
+
+The built-in rate limiter is in-memory and per process. Next.js route handlers do not expose the socket address, and `X-Forwarded-For` / `X-Real-IP` can be forged by any client, so by default these headers are ignored and **all callers share one rate-limit bucket** (`RATE_LIMIT_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_MS` in total).
+
+If the app runs behind a reverse proxy you control that sets `X-Forwarded-For` (appending the real client address) or `X-Real-IP`, set `TRUST_PROXY=true`. The limiter then keys buckets on the right-most `X-Forwarded-For` entry (the one your proxy added), falling back to `X-Real-IP`. Only enable this when the app is not directly reachable by clients, otherwise they can forge the header.
+
+### Safety identifier
+
+When clients can be distinguished (`TRUST_PROXY=true`), realtime requests send OpenAI an `OpenAI-Safety-Identifier` header containing a salted SHA-256 hash of the client address, never the raw IP. Set `SAFETY_IDENTIFIER_SALT` to a long random secret to keep identifiers stable across restarts; otherwise a random per-process salt is used. Without `TRUST_PROXY` the header is omitted.
 
 ## Deployment
 

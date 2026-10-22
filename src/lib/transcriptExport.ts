@@ -16,11 +16,13 @@ export type TranscriptDocument = {
 const pad = (value: number, digits = 2) => value.toString().padStart(digits, '0');
 
 const formatTimestamp = (seconds: number, separator: ',' | '.') => {
-  const bounded = Math.max(0, seconds);
-  const hours = Math.floor(bounded / 3600);
-  const minutes = Math.floor((bounded % 3600) / 60);
-  const wholeSeconds = Math.floor(bounded % 60);
-  const milliseconds = Math.floor((bounded - Math.floor(bounded)) * 1000);
+  // Work in whole milliseconds, rounded, so values such as 1.001s (stored as
+  // 1.000999...) are not truncated to 1.000s by floating-point error.
+  const totalMs = Math.round(Math.max(0, Number.isFinite(seconds) ? seconds : 0) * 1000);
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const wholeSeconds = Math.floor((totalMs % 60_000) / 1000);
+  const milliseconds = totalMs % 1000;
   return `${pad(hours)}:${pad(minutes)}:${pad(wholeSeconds)}${separator}${pad(milliseconds, 3)}`;
 };
 

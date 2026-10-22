@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { errorResponseBody, toAppError } from '@/src/lib/errors';
 import { logger } from '@/src/lib/logging';
 import { realtimeSessionSchema } from '@/src/lib/validation';
-import { assertRateLimit, getClientId } from '@/src/server/rateLimit';
+import { assertRateLimit, getSafetyIdentifier } from '@/src/server/rateLimit';
 import { createRealtimeCallAnswer } from '@/src/server/realtime';
 
 export const runtime = 'nodejs';
@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
     const answer = await createRealtimeCallAnswer({
       ...payload,
       sdp,
-      safetyIdentifier: getClientId(request)
+      safetyIdentifier: getSafetyIdentifier(request)
     });
 
     logger.info('realtime_call_created', {

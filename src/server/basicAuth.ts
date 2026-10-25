@@ -82,15 +82,44 @@ export const basicAuthDenial = (request: Request): Response | undefined => {
     );
   }
 
-  if (getAuthenticatedUser(request, config)) return undefined;
-  return Response.json(
-    { error: 'Authentication required.' },
-    {
-      status: 401,
-      headers: {
-        ...headers,
-        'WWW-Authenticate': 'Basic realm="Signal STT", charset="UTF-8"'
+  if (!getAuthenticatedUser(request, config)) {
+    return Response.json(
+      { error: 'Authentication required.' },
+      {
+        status: 401,
+        headers: {
+          ...headers,
+          'WWW-Authenticate': 'Basic realm="Signal STT", charset="UTF-8"'
+        }
+      }
+    );
+  }
+
+  // Browsers attach cached Basic credentials automatically. CORS alone does not
+  // stop a foreign site sending a simple POST, so reject cross-site mutations.
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) {
+    const origin = request.headers.get('origin');
+    let foreignOrigin = false;
+    if (origin !== null) {
+      try {
+        const parsed = new URL(origin);
+        // Compare Host, not forwarded headers: this also supports TLS terminated
+        // by a reverse proxy that preserves Host. Opaque origins fail closed.
+        const host = request.headers.get('host') || new URL(request.url).host;
+        foreignOrigin = !['http:', 'https:'].includes(parsed.protocol) || parsed.host !== host;
+      } catch {
+        foreignOrigin = true;
       }
     }
-  );
+    if (foreignOrigin || request.headers.get('sec-fetch-site') === 'cross-site') {
+      return Response.json(
+        { error: 'Cross-site requests are not allowed.' },
+        {
+          status: 403,
+          headers
+        }
+      );
+    }
+  }
+  return undefined;
 };

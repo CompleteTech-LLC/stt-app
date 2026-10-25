@@ -23,6 +23,32 @@ describe('paid route authentication', () => {
     ['transcribe', transcribe],
     ['realtime/call', realtimeCall]
   ] as const)(
+    'rejects authenticated cross-site %s POSTs before reading the body',
+    async (path, handler) => {
+      vi.stubEnv('BASIC_AUTH_USER', 'operator');
+      vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+      const request = new NextRequest(`http://localhost/api/${path}`, {
+        method: 'POST',
+        headers: {
+          authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`,
+          origin: 'https://foreign.example',
+          'sec-fetch-site': 'cross-site'
+        }
+      });
+      const readForm = vi.spyOn(request, 'formData');
+      const readText = vi.spyOn(request, 'text');
+      expect((await handler(request)).status).toBe(403);
+      expect(readForm).not.toHaveBeenCalled();
+      expect(readText).not.toHaveBeenCalled();
+      expect(transcribeFile).not.toHaveBeenCalled();
+      expect(createRealtimeCallAnswer).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    ['transcribe', transcribe],
+    ['realtime/call', realtimeCall]
+  ] as const)(
     'denies direct %s route calls before reading the body or contacting OpenAI',
     async (path, handler) => {
       vi.stubEnv('BASIC_AUTH_USER', 'operator');

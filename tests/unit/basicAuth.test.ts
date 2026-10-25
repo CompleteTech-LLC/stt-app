@@ -106,3 +106,49 @@ describe('Proxy coverage', () => {
     expect(proxy(request(undefined, '/api/health')).headers.get('x-middleware-next')).toBe('1');
   });
 });
+
+describe('authenticated browser mutations', () => {
+  const mutation = (headers: Record<string, string> = {}) =>
+    new NextRequest('http://localhost/api/transcribe', {
+      method: 'POST',
+      headers: { authorization: authorize(), ...headers }
+    });
+
+  it.each([
+    { origin: 'https://foreign.example' },
+    { origin: 'null' },
+    { origin: 'not-a-url' },
+    { 'sec-fetch-site': 'cross-site' },
+    { origin: 'http://localhost:9000' }
+  ])('rejects cross-site or opaque browser requests: %j', (headers) => {
+    enableAuth();
+    expect(basicAuthDenial(mutation(headers))?.status).toBe(403);
+    expect(proxy(mutation(headers)).status).toBe(403);
+  });
+
+  it('permits same-origin requests and credentialed CLI requests without Origin', () => {
+    enableAuth();
+    expect(
+      basicAuthDenial(mutation({ origin: 'http://localhost', 'sec-fetch-site': 'same-origin' }))
+    ).toBeUndefined();
+    expect(basicAuthDenial(mutation())).toBeUndefined();
+  });
+
+  it('supports TLS-terminating reverse proxies that preserve Host', () => {
+    enableAuth();
+    expect(
+      basicAuthDenial(mutation({ origin: 'https://stt.example.com', host: 'stt.example.com' }))
+    ).toBeUndefined();
+    expect(
+      basicAuthDenial(
+        mutation({ origin: 'https://foreign.example', 'x-forwarded-host': 'foreign.example' })
+      )?.status
+    ).toBe(403);
+  });
+
+  it('leaves the default unauthenticated mode unchanged', () => {
+    vi.stubEnv('BASIC_AUTH_USER', '');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', '');
+    expect(basicAuthDenial(mutation({ origin: 'https://foreign.example' }))).toBeUndefined();
+  });
+});

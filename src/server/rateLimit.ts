@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import { getServerConfig } from '@/src/lib/config';
 import { AppError } from '@/src/lib/errors';
+import { getAuthenticatedUser } from '@/src/server/basicAuth';
 
 type Bucket = {
   count: number;
@@ -27,6 +28,8 @@ export const getClientId = (
   request: Request,
   { trustProxy = getServerConfig().trustProxy }: ClientIdOptions = {}
 ) => {
+  const authenticatedUser = getAuthenticatedUser(request);
+  if (authenticatedUser) return `basic:${authenticatedUser}`;
   if (!trustProxy) return SHARED_CLIENT_ID;
 
   // A trusted reverse proxy appends the address it saw to X-Forwarded-For, so

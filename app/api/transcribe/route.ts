@@ -11,11 +11,15 @@ import {
 import { assertRateLimit } from '@/src/server/rateLimit';
 import { transcribeFile } from '@/src/server/fileTranscription';
 import { getServerConfig } from '@/src/lib/config';
+import { basicAuthDenial } from '@/src/server/basicAuth';
 
 export const runtime = 'nodejs';
 export const maxDuration = 120;
 
 export async function POST(request: NextRequest) {
+  const denied = basicAuthDenial(request);
+  if (denied) return denied;
+
   try {
     const config = getServerConfig();
     assertRateLimit(request, 'transcribe');

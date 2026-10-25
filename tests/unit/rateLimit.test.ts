@@ -20,6 +20,18 @@ afterEach(() => {
 });
 
 describe('client identification', () => {
+  it('keys valid Basic credentials by username instead of a spoofable address', () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    const authorization = `Basic ${Buffer.from('operator:test-password').toString('base64')}`;
+    expect(
+      getClientId(request({ authorization, 'x-forwarded-for': '198.51.100.7' }), {
+        trustProxy: true
+      })
+    ).toBe('basic:operator');
+    expect(getClientId(request({ authorization: 'Basic aW52YWxpZA==' }))).toBe(SHARED_CLIENT_ID);
+  });
+
   it('ignores client-supplied forwarding headers unless TRUST_PROXY is enabled', () => {
     const spoofed = request({ 'x-forwarded-for': '203.0.113.9', 'x-real-ip': '203.0.113.10' });
     expect(getClientId(spoofed, { trustProxy: false })).toBe(SHARED_CLIENT_ID);
@@ -43,6 +55,18 @@ describe('client identification', () => {
 });
 
 describe('rate limiting', () => {
+  it('shares one authenticated account bucket even when client addresses differ', () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('TRUST_PROXY', 'true');
+    vi.stubEnv('RATE_LIMIT_MAX_REQUESTS', '1');
+    const authorization = `Basic ${Buffer.from('operator:test-password').toString('base64')}`;
+    assertRateLimit(request({ authorization, 'x-forwarded-for': '198.51.100.7' }), 'test');
+    expect(() =>
+      assertRateLimit(request({ authorization, 'x-forwarded-for': '198.51.100.8' }), 'test')
+    ).toThrow();
+  });
+
   it('cannot be bypassed by rotating X-Forwarded-For without TRUST_PROXY', () => {
     vi.stubEnv('RATE_LIMIT_MAX_REQUESTS', '2');
     assertRateLimit(request({ 'x-forwarded-for': '10.0.0.1' }), 'test');
@@ -63,6 +87,18 @@ describe('rate limiting', () => {
 
 describe('safety identifier', () => {
   const viaProxy = request({ 'x-forwarded-for': '198.51.100.7' });
+
+  it('hashes the verified account without requiring a proxy or revealing credentials', () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    const authenticated = request({
+      authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`
+    });
+    const id = getSafetyIdentifier(authenticated, { trustProxy: false, salt: 'test-salt' });
+    expect(id).toMatch(/^[0-9a-f]{32}$/);
+    expect(id).not.toContain('operator');
+    expect(id).toBe(getSafetyIdentifier(authenticated, { trustProxy: true, salt: 'test-salt' }));
+  });
 
   it('never contains the raw client IP', () => {
     const id = getSafetyIdentifier(viaProxy, { trustProxy: true, salt: 'test-salt' });

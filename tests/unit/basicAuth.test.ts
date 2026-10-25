@@ -114,7 +114,7 @@ describe('authenticated browser mutations', () => {
       headers: { authorization: authorize(), ...headers }
     });
 
-  it.each([
+  it.each<Record<string, string>>([
     { origin: 'https://foreign.example' },
     { origin: 'null' },
     { origin: 'not-a-url' },

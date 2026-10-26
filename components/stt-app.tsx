@@ -187,7 +187,13 @@ export function SttApp() {
 
   const transcriptText = transcript.text;
   const displayedTranscriptText = joinTranscriptText(transcriptText, partial);
-  const canExportTimed = hasTimestamps(transcript);
+  const exportDocument: TranscriptDocument = {
+    ...transcript,
+    text: displayedTranscriptText,
+    // A live draft has no alignment with any previously uploaded segments.
+    segments: partial ? [] : transcript.segments
+  };
+  const canExportTimed = hasTimestamps(exportDocument);
   const liveStatus = liveStatusCopy[liveState];
 
   const fileHelp = useMemo(
@@ -201,6 +207,7 @@ export function SttApp() {
       setTranscript((current) => ({
         ...current,
         text: `${current.text}${current.text && !current.text.endsWith(' ') ? ' ' : ''}${text}`.trimStart(),
+        segments: [],
         language,
         model: sttModels.realtime,
         createdAt: current.createdAt || new Date().toISOString()
@@ -614,7 +621,9 @@ export function SttApp() {
             onChange={(event) => {
               setTranscript((current) => ({
                 ...current,
-                text: event.target.value
+                text: event.target.value,
+                // Whole-document edits cannot be aligned to the source segments.
+                segments: []
               }));
               setPartial('');
             }}
@@ -623,13 +632,7 @@ export function SttApp() {
           <div className="export-row" aria-label="Export transcript">
             <button
               type="button"
-              onClick={() =>
-                download(
-                  'transcript.txt',
-                  exportTxt({ ...transcript, text: displayedTranscriptText }),
-                  'text/plain'
-                )
-              }
+              onClick={() => download('transcript.txt', exportTxt(exportDocument), 'text/plain')}
               disabled={!displayedTranscriptText}
             >
               <Download size={17} aria-hidden />
@@ -638,11 +641,7 @@ export function SttApp() {
             <button
               type="button"
               onClick={() =>
-                download(
-                  'transcript.json',
-                  exportJson({ ...transcript, text: displayedTranscriptText }),
-                  'application/json'
-                )
+                download('transcript.json', exportJson(exportDocument), 'application/json')
               }
               disabled={!displayedTranscriptText}
             >
@@ -652,22 +651,35 @@ export function SttApp() {
             <button
               type="button"
               onClick={() =>
-                download('transcript.srt', exportSrt(transcript.segments), 'application/x-subrip')
+                download(
+                  'transcript.srt',
+                  exportSrt(exportDocument.segments),
+                  'application/x-subrip'
+                )
               }
               disabled={!canExportTimed}
+              aria-describedby="timed-export-help"
             >
               <Download size={17} aria-hidden />
               SRT
             </button>
             <button
               type="button"
-              onClick={() => download('transcript.vtt', exportVtt(transcript.segments), 'text/vtt')}
+              onClick={() =>
+                download('transcript.vtt', exportVtt(exportDocument.segments), 'text/vtt')
+              }
               disabled={!canExportTimed}
+              aria-describedby="timed-export-help"
             >
               <Download size={17} aria-hidden />
               VTT
             </button>
           </div>
+          <p id="timed-export-help" className="state-detail">
+            TXT/JSON export the current text, including live updates. SRT/VTT require original
+            segment timestamps. Editing text or adding live speech removes those timestamps; JSON
+            then includes an empty segments list.
+          </p>
         </div>
       </section>
     </main>

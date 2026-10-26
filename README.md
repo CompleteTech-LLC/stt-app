@@ -13,6 +13,14 @@ Status: early prototype (version 0.1.0, not published as a package). It needs yo
 - Transcript workspace supports editing, copy, clear, TXT/JSON export, and SRT/VTT export when timestamp segments exist.
 - No persistent storage is used by default. Uploads are handled in memory and are not written to disk.
 
+### Transcript exports
+
+TXT and JSON export the text currently shown in the workspace, including live drafts and edits.
+SRT and VTT are available only when the transcript has original timestamp segments. Editing the
+text or adding live speech invalidates that alignment, so subtitle exports are disabled and JSON
+exports an empty `segments` list. A new file transcription can supply fresh timestamps. Realtime
+events do not supply segment timestamps, so live transcripts support TXT/JSON only.
+
 ## Architecture
 
 - `app/api/transcribe/route.ts`: multipart upload API, size checks, rate limiting, server-side transcription.

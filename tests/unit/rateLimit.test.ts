@@ -23,6 +23,7 @@ describe('client identification', () => {
   it('keys valid Basic credentials by username instead of a spoofable address', () => {
     vi.stubEnv('BASIC_AUTH_USER', 'operator');
     vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
     const authorization = `Basic ${Buffer.from('operator:test-password').toString('base64')}`;
     expect(
       getClientId(request({ authorization, 'x-forwarded-for': '198.51.100.7' }), {
@@ -58,6 +59,7 @@ describe('rate limiting', () => {
   it('shares one authenticated account bucket even when client addresses differ', () => {
     vi.stubEnv('BASIC_AUTH_USER', 'operator');
     vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
     vi.stubEnv('TRUST_PROXY', 'true');
     vi.stubEnv('RATE_LIMIT_MAX_REQUESTS', '1');
     const authorization = `Basic ${Buffer.from('operator:test-password').toString('base64')}`;
@@ -91,6 +93,7 @@ describe('safety identifier', () => {
   it('hashes the verified account without requiring a proxy or revealing credentials', () => {
     vi.stubEnv('BASIC_AUTH_USER', 'operator');
     vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
     const authenticated = request({
       authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`
     });

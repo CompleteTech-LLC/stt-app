@@ -63,36 +63,26 @@ test('browser reuses Basic credentials for same-origin API and blocks a foreign 
   }
 });
 
-test('missing canonical origin fails closed over HTTP and in the browser', async ({
-  browser,
+test('missing canonical origin fails closed for protected requests over HTTP', async ({
   request
 }) => {
   const unconfigured = 'http://127.0.0.1:3110';
-  const response = await request.post(`${unconfigured}/api/realtime/call`, {
-    headers: {
-      authorization,
-      origin: unconfigured,
-      host: '127.0.0.1:3110',
-      'x-forwarded-host': '127.0.0.1:3110',
-      'x-forwarded-proto': 'http'
-    },
-    data: 'invalid'
-  });
-  expect(response.status()).toBe(503);
-  const context = await browser.newContext({
-    httpCredentials: { username: 'synthetic-user', password: 'synthetic-password' }
-  });
-  try {
-    const page = await context.newPage();
-    expect((await page.goto(unconfigured))?.status()).toBe(200);
-    expect(
-      await page.evaluate(async () => {
-        const response = await fetch('/api/realtime/call', { method: 'POST', body: 'invalid' });
-        return response.status;
-      })
-    ).toBe(503);
-  } finally {
-    await context.close();
+  expect((await request.get(`${unconfigured}/api/health`)).status()).toBe(200);
+  for (const headers of [{}, { authorization }] as Record<string, string>[]) {
+    expect((await request.get(unconfigured, { headers })).status()).toBe(503);
+    for (const path of ['/api/transcribe', '/api/realtime/call']) {
+      expect(
+        (await request.post(`${unconfigured}${path}`, { headers, data: 'invalid' })).status()
+      ).toBe(503);
+      expect(
+        (
+          await request.post(`${unconfigured}${path}`, {
+            headers: { ...headers, origin: unconfigured },
+            data: 'invalid'
+          })
+        ).status()
+      ).toBe(503);
+    }
   }
 });
 

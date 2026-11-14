@@ -56,6 +56,7 @@ describe('paid route authentication', () => {
     async (path, handler) => {
       vi.stubEnv('BASIC_AUTH_USER', 'operator');
       vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+      vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
       const request = new NextRequest(`http://localhost/api/${path}`, { method: 'POST' });
       const readForm = vi.spyOn(request, 'formData');
       const readText = vi.spyOn(request, 'text');
@@ -71,6 +72,7 @@ describe('paid route authentication', () => {
   it('lets valid credentials reach realtime processing with a hashed account id', async () => {
     vi.stubEnv('BASIC_AUTH_USER', 'operator');
     vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
     vi.mocked(createRealtimeCallAnswer).mockResolvedValue({ sdp: 'v=0\r\n', model: 'test-model' });
     const response = await realtimeCall(
       new NextRequest('http://localhost/api/realtime/call', {
@@ -113,12 +115,38 @@ describe('authentication at paid route boundaries', () => {
     expect(createRealtimeCallAnswer).not.toHaveBeenCalled();
   });
 
+  it.each(['', 'https://example.com/path'])(
+    'rejects originless paid requests with invalid origin %j',
+    async (origin) => {
+      vi.stubEnv('BASIC_AUTH_USER', 'operator');
+      vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+      vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', origin);
+      for (const [path, handler] of [
+        ['transcribe', transcribe],
+        ['realtime/call', realtimeCall]
+      ] as const) {
+        const request = new NextRequest(`http://localhost/api/${path}`, {
+          method: 'POST',
+          headers: { authorization: credentials('operator:test-password') }
+        });
+        const readForm = vi.spyOn(request, 'formData');
+        const readText = vi.spyOn(request, 'text');
+        expect((await handler(request)).status).toBe(503);
+        expect(readForm).not.toHaveBeenCalled();
+        expect(readText).not.toHaveBeenCalled();
+      }
+      expect(transcribeFile).not.toHaveBeenCalled();
+      expect(createRealtimeCallAnswer).not.toHaveBeenCalled();
+    }
+  );
+
   it.each([
     ['transcribe', transcribe],
     ['realtime/call', realtimeCall]
   ] as const)('rejects an incorrect password before processing %s', async (path, handler) => {
     vi.stubEnv('BASIC_AUTH_USER', 'operator');
     vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
     const request = new NextRequest(`http://localhost/api/${path}`, {
       method: 'POST',
       headers: { authorization: credentials('operator:wrong') }
@@ -136,6 +164,7 @@ describe('authentication at paid route boundaries', () => {
   it('does not charge rejected requests against the verified account rate limit', async () => {
     vi.stubEnv('BASIC_AUTH_USER', 'operator');
     vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
     vi.stubEnv('RATE_LIMIT_MAX_REQUESTS', '1');
     vi.mocked(createRealtimeCallAnswer).mockResolvedValue({ sdp: 'v=0\r\n', model: 'test-model' });
     const call = (credential: string) =>
@@ -156,6 +185,7 @@ describe('authentication at paid route boundaries', () => {
   it('passes the verified account identifier to the provider despite changing forwarded addresses', async () => {
     vi.stubEnv('BASIC_AUTH_USER', 'operator');
     vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
     vi.stubEnv('TRUST_PROXY', 'true');
     vi.stubEnv('SAFETY_IDENTIFIER_SALT', 'synthetic-salt');
     vi.stubEnv('RATE_LIMIT_MAX_REQUESTS', '10');

@@ -40,8 +40,21 @@ describe('Basic authentication configuration', () => {
     { BASIC_AUTH_USER: 'operator', BASIC_AUTH_PASSWORD: 'x'.repeat(6144) },
     { BASIC_AUTH_USER: 'operator', BASIC_AUTH_PASSWORD: '\ud800' }
   ])('rejects an incomplete or invalid config: %j', (env) => {
-    expect(getBasicAuthConfig(env)).toEqual({ mode: 'invalid' });
+    expect(getBasicAuthConfig({ BASIC_AUTH_PUBLIC_ORIGIN: 'http://localhost', ...env })).toEqual({
+      mode: 'invalid'
+    });
   });
+
+  it.each(['', 'https://example.com/path', 'https://user@example.com', 'null'])(
+    'rejects invalid public origin %j',
+    (origin) => {
+      enableAuth();
+      vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', origin);
+      expect(getBasicAuthConfig().mode).toBe('invalid');
+      expect(proxy(request(authorize())).status).toBe(503);
+      expect(proxy(request()).status).toBe(503);
+    }
+  );
 
   it('fails closed at runtime when only one credential is set', async () => {
     vi.stubEnv('BASIC_AUTH_USER', 'operator');
@@ -63,6 +76,7 @@ describe('Basic credentials', () => {
   it('supports UTF-8 and colons in passwords without trimming secrets', () => {
     vi.stubEnv('BASIC_AUTH_USER', 'équipe');
     vi.stubEnv('BASIC_AUTH_PASSWORD', '  test:password:é  ');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
     expect(getAuthenticatedUser(request(authorize('équipe:  test:password:é  ')))).toBe('équipe');
     expect(getAuthenticatedUser(request(authorize('équipe:test:password:é')))).toBeUndefined();
   });
@@ -70,6 +84,7 @@ describe('Basic credentials', () => {
   it('preserves a leading UTF-8 BOM in the configured username', () => {
     vi.stubEnv('BASIC_AUTH_USER', '\uFEFFoperator');
     vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
     expect(getAuthenticatedUser(request(authorize('\uFEFFoperator:test-password')))).toBe(
       '\uFEFFoperator'
     );

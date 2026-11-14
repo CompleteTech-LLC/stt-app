@@ -5,8 +5,9 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 type Env = Record<string, string | undefined>;
 
 type BasicAuthConfig =
-  | { mode: 'disabled' | 'invalid' }
-  | { mode: 'enabled'; username: string; password: string };
+  | { mode: 'disabled' }
+  | { mode: 'invalid' }
+  | { mode: 'enabled'; username: string; password: string; publicOrigin: string };
 
 const hasControlCharacter = (value: string) =>
   Array.from(value).some((character) => {
@@ -32,7 +33,17 @@ export const getBasicAuthConfig = (env: Env = process.env): BasicAuthConfig => {
     return { mode: 'invalid' };
   }
 
-  return { mode: 'enabled', username, password };
+  const publicOrigin = env.BASIC_AUTH_PUBLIC_ORIGIN || '';
+  try {
+    const parsed = new URL(publicOrigin);
+    if (!['http:', 'https:'].includes(parsed.protocol) || publicOrigin !== parsed.origin) {
+      return { mode: 'invalid' };
+    }
+  } catch {
+    return { mode: 'invalid' };
+  }
+
+  return { mode: 'enabled', username, password, publicOrigin };
 };
 
 const digest = (value: string) => createHash('sha256').update(value, 'utf8').digest();
@@ -105,28 +116,11 @@ export const basicAuthDenial = (request: Request): Response | undefined => {
     // Host, forwarding headers, or Next's internally reconstructed request URL.
     let foreignOrigin = false;
     if (origin !== null) {
-      const publicOrigin = process.env.BASIC_AUTH_PUBLIC_ORIGIN || '';
       try {
-        const target = new URL(publicOrigin);
-        if (
-          !['http:', 'https:'].includes(target.protocol) ||
-          target.username ||
-          target.password ||
-          publicOrigin !== target.origin
-        ) {
-          throw new Error('Invalid public origin');
-        }
-        try {
-          const parsed = new URL(origin);
-          foreignOrigin = origin !== parsed.origin || parsed.origin !== target.origin;
-        } catch {
-          foreignOrigin = true;
-        }
+        const parsed = new URL(origin);
+        foreignOrigin = origin !== parsed.origin || parsed.origin !== config.publicOrigin;
       } catch {
-        return Response.json(
-          { error: 'Application public origin is not configured correctly.' },
-          { status: 503, headers }
-        );
+        foreignOrigin = true;
       }
     }
     if (foreignOrigin || request.headers.get('sec-fetch-site') === 'cross-site') {

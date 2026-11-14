@@ -6,7 +6,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
-    exclude: ['node_modules/**', '.next/**', 'tests/e2e/**'],
+    exclude: ['node_modules/**', '.next/**', 'tests/e2e/**', 'tests/auth-e2e/**'],
     setupFiles: ['./vitest.setup.ts'],
     coverage: {
       reporter: ['text', 'json-summary']

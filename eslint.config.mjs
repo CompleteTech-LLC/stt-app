@@ -8,6 +8,7 @@ export default tseslint.config(
   {
     ignores: [
       '.next/**',
+      '.next-auth-unconfigured/**',
       'coverage/**',
       'node_modules/**',
       'playwright-report/**',

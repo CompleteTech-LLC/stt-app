@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "quality": "npm run lint && npm run format && npm run typecheck && npm run test && npm run test:e2e"
+    "test:auth-e2e": "playwright test -c playwright.auth.config.ts",
+    "quality": "npm run lint && npm run format && npm run typecheck && npm run test && npm run test:e2e && npm run test:auth-e2e"
   },
   "dependencies": {
     "@next/env": "latest",

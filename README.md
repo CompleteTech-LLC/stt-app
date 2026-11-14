@@ -88,9 +88,13 @@ Defaults are centralized in `src/lib/constants.ts` and can be overridden through
 
 Set both `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` as server-only environment variables. Browsers prompt for these credentials before opening the app and reuse them for same-origin API requests. Use a strong password and HTTPS outside local development: Basic authentication encodes credentials but does not encrypt them. Never put these values in `NEXT_PUBLIC_*` variables.
 
+The username cannot contain a colon, and neither value may contain control characters. The UTF-8 encoded `username:password` pair is limited to 6,144 bytes.
+
 Every page and API request is protected except the exact `/api/health` endpoint, which remains available to health probes. Both paid API routes also validate credentials themselves before reading uploads or contacting OpenAI. Authenticated mutations reject cross-site browser requests and opaque or foreign origins. Reverse proxies must preserve the public `Host` header for same-origin browser requests to pass this check; client-supplied forwarding headers are not trusted. Credentialed scripts without an `Origin` header remain supported. An incomplete or invalid configuration returns HTTP 503 instead of allowing access; production startup validation also rejects it. Leave both variables empty to disable authentication.
 
 This is one shared account, without individual users, sessions, or a logout button. Anyone sharing the credentials shares the same rate-limit bucket and safety identifier, regardless of IP. A per-user identity provider or authenticating reverse proxy remains appropriate for multi-user deployments. Scripts calling the paid APIs must also supply the configured Basic credentials.
+
+The application does not rate-limit failed authentication attempts. Use a strong, unique password and an upstream access control or brute-force protection where needed.
 
 ### Rate limiting and proxies
 

@@ -25,7 +25,9 @@ export const getBasicAuthConfig = (env: Env = process.env): BasicAuthConfig => {
     !password ||
     username.includes(':') ||
     hasControlCharacter(username) ||
-    hasControlCharacter(password)
+    hasControlCharacter(password) ||
+    Buffer.from(`${username}:${password}`, 'utf8').toString('utf8') !== `${username}:${password}` ||
+    Buffer.byteLength(`${username}:${password}`, 'utf8') > 6144
   ) {
     return { mode: 'invalid' };
   }

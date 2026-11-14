@@ -35,7 +35,9 @@ describe('Basic authentication configuration', () => {
     { BASIC_AUTH_PASSWORD: 'test-password' },
     { BASIC_AUTH_USER: 'operator:extra', BASIC_AUTH_PASSWORD: 'test-password' },
     { BASIC_AUTH_USER: 'operator\n', BASIC_AUTH_PASSWORD: 'test-password' },
-    { BASIC_AUTH_USER: 'operator', BASIC_AUTH_PASSWORD: 'test\npassword' }
+    { BASIC_AUTH_USER: 'operator', BASIC_AUTH_PASSWORD: 'test\npassword' },
+    { BASIC_AUTH_USER: 'operator', BASIC_AUTH_PASSWORD: 'x'.repeat(6144) },
+    { BASIC_AUTH_USER: 'operator', BASIC_AUTH_PASSWORD: '\ud800' }
   ])('rejects an incomplete or invalid config: %j', (env) => {
     expect(getBasicAuthConfig(env)).toEqual({ mode: 'invalid' });
   });

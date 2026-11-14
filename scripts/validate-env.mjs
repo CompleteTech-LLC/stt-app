@@ -16,7 +16,9 @@ if (
     !password ||
     username.includes(':') ||
     hasControlCharacter(username) ||
-    hasControlCharacter(password))
+    hasControlCharacter(password) ||
+    Buffer.from(`${username}:${password}`, 'utf8').toString('utf8') !== `${username}:${password}` ||
+    Buffer.byteLength(`${username}:${password}`, 'utf8') > 6144)
 ) {
   console.error(
     'Set both BASIC_AUTH_USER and BASIC_AUTH_PASSWORD to valid values, or leave both blank.'

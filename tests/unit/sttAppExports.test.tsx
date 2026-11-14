@@ -230,6 +230,51 @@ describe('transcript export controls', () => {
     expect(JSON.parse(await readDownload('JSON'))).toEqual(uploadedTranscript);
     expect(getExportButton('SRT')).toBeEnabled();
     expect(getExportButton('VTT')).toBeEnabled();
+    emitTranscript('delta', ' continued');
+    emitTranscript('completed', 'Old live draft continued');
+    expect(JSON.parse(await readDownload('JSON'))).toEqual(uploadedTranscript);
+    emitTranscript('completed', 'Next utterance.');
+    expect(await readDownload('TXT')).toBe('Original transcript. Next utterance.\n');
+  });
+
+  it('keeps edits to a live draft when its remaining events arrive', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('delta', 'Draft words');
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: 'Corrected words' }
+    });
+    emitTranscript('delta', ' more');
+    emitTranscript('completed', 'Draft words more');
+    expect(await readDownload('TXT')).toBe('Corrected words\n');
+    emitTranscript('delta', 'Next');
+    emitTranscript('completed', 'Next sentence.');
+    expect(await readDownload('TXT')).toBe('Corrected words Next sentence.\n');
+  });
+
+  it('does not restore a cleared draft when its completion arrives', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('delta', 'Discard me');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    emitTranscript('completed', 'Discard me');
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('');
+    emitTranscript('completed', 'New text');
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('New text');
+  });
+
+  it('ignores queued live events after stopping and keeps a just-received draft', async () => {
+    render(<SttApp />);
+    await startLive();
+    act(() => {
+      channel.onmessage?.({ data: JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.delta', delta: 'Last draft'
+      }) });
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    });
+    emitTranscript('completed', 'Last draft');
+    emitTranscript('delta', ' late');
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('Last draft');
   });
 
   it('disables every export when the workspace is cleared', async () => {

@@ -184,6 +184,15 @@ export function SttApp() {
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const fallbackChunksRef = useRef<Blob[]>([]);
+  const draftRef = useRef('');
+  const discardUtteranceRef = useRef(false);
+  const liveSessionRef = useRef(0);
+
+  const discardLiveDraft = useCallback(() => {
+    if (draftRef.current) discardUtteranceRef.current = true;
+    draftRef.current = '';
+    setPartial('');
+  }, []);
 
   const transcriptText = transcript.text;
   const displayedTranscriptText = joinTranscriptText(transcriptText, partial);
@@ -212,12 +221,14 @@ export function SttApp() {
         model: sttModels.realtime,
         createdAt: current.createdAt || new Date().toISOString()
       }));
+      draftRef.current = '';
       setPartial('');
     },
     [language]
   );
 
   const stopMedia = useCallback(() => {
+    liveSessionRef.current += 1;
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -238,9 +249,9 @@ export function SttApp() {
       if (!response.ok) throw await readApiFailure(response);
       const data = (await response.json()) as { transcript: TranscriptDocument };
       setTranscript(data.transcript);
-      setPartial('');
+      discardLiveDraft();
     },
-    [fileModel, language]
+    [discardLiveDraft, fileModel, language]
   );
 
   const startFallbackRecorder = useCallback(
@@ -272,7 +283,10 @@ export function SttApp() {
   );
 
   const startLive = useCallback(async () => {
+    const session = ++liveSessionRef.current;
     setLiveError('');
+    draftRef.current = '';
+    discardUtteranceRef.current = false;
     setPartial('');
     setLiveState('requesting-mic');
 
@@ -294,13 +308,18 @@ export function SttApp() {
 
       const channel = pc.createDataChannel('oai-events');
       channel.onmessage = (message) => {
+        if (session !== liveSessionRef.current) return;
         try {
           const parsed = JSON.parse(message.data as string) as Record<string, unknown>;
           const update = extractRealtimeText(parsed);
           if (!update) return;
-          if (update.kind === 'partial')
-            setPartial((current) => appendRealtimeDelta(current, update.text));
-          else applyFinalText(update.text);
+          if (update.kind === 'partial') {
+            if (discardUtteranceRef.current) return;
+            draftRef.current = appendRealtimeDelta(draftRef.current, update.text);
+            setPartial(draftRef.current);
+          } else if (discardUtteranceRef.current) {
+            discardUtteranceRef.current = false;
+          } else applyFinalText(update.text);
         } catch {
           // Realtime data channel can include events not needed by this UI.
         }
@@ -358,13 +377,13 @@ export function SttApp() {
       return;
     }
 
-    if (partial.trim()) {
-      applyFinalText(partial);
+    if (draftRef.current.trim()) {
+      applyFinalText(draftRef.current);
     }
     stopMedia();
     setPartial('');
     setLiveState('stopped');
-  }, [applyFinalText, partial, stopMedia]);
+  }, [applyFinalText, stopMedia]);
 
   const validateClientFile = (candidate: File) => {
     if (candidate.size > appLimits.maxUploadBytes) {
@@ -404,7 +423,7 @@ export function SttApp() {
 
       const data = (await response.json()) as { transcript: TranscriptDocument };
       setTranscript(data.transcript);
-      setPartial('');
+      discardLiveDraft();
       setUploadState('done');
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : 'Upload transcription failed.');
@@ -414,7 +433,7 @@ export function SttApp() {
 
   const clearWorkspace = () => {
     setTranscript(emptyTranscript);
-    setPartial('');
+    discardLiveDraft();
     setUploadError('');
     setLiveError('');
   };
@@ -627,7 +646,7 @@ export function SttApp() {
                 // Whole-document edits cannot be aligned to the source segments.
                 segments: []
               }));
-              setPartial('');
+              discardLiveDraft();
             }}
           />
 

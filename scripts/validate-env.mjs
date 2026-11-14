@@ -3,6 +3,42 @@ import nextEnv from '@next/env';
 const { loadEnvConfig } = nextEnv;
 loadEnvConfig(process.cwd());
 
+const username = process.env.BASIC_AUTH_USER || '';
+const password = process.env.BASIC_AUTH_PASSWORD || '';
+const hasControlCharacter = (value) =>
+  Array.from(value).some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+if (
+  (username || password) &&
+  (!username ||
+    !password ||
+    username.includes(':') ||
+    hasControlCharacter(username) ||
+    hasControlCharacter(password) ||
+    Buffer.from(`${username}:${password}`, 'utf8').toString('utf8') !== `${username}:${password}` ||
+    Buffer.byteLength(`${username}:${password}`, 'utf8') > 6144)
+) {
+  console.error(
+    'Set both BASIC_AUTH_USER and BASIC_AUTH_PASSWORD to valid values, or leave both blank.'
+  );
+  process.exit(1);
+}
+
+if (username && password) {
+  const publicOrigin = process.env.BASIC_AUTH_PUBLIC_ORIGIN || '';
+  try {
+    const parsed = new URL(publicOrigin);
+    if (!['http:', 'https:'].includes(parsed.protocol) || publicOrigin !== parsed.origin) {
+      throw new Error('Invalid public origin');
+    }
+  } catch {
+    console.error('Set BASIC_AUTH_PUBLIC_ORIGIN to the exact public http(s) origin.');
+    process.exit(1);
+  }
+}
+
 const key = process.env.OPENAI_API_KEY;
 
 if (!key) {

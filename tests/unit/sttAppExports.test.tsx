@@ -181,6 +181,27 @@ describe('transcript export controls', () => {
     expect(JSON.parse(await readDownload('JSON')).segments).toEqual([]);
   });
 
+  it('exports successive live utterances as the second draft becomes final', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('completed', 'First sentence.');
+    emitTranscript('delta', 'Second');
+    emitTranscript('delta', ' sentence');
+
+    expect(await readDownload('TXT')).toBe('First sentence. Second sentence\n');
+    expect(JSON.parse(await readDownload('JSON'))).toMatchObject({
+      text: 'First sentence. Second sentence',
+      segments: []
+    });
+
+    emitTranscript('completed', 'Second sentence corrected.');
+    expect(await readDownload('TXT')).toBe('First sentence. Second sentence corrected.\n');
+    expect(JSON.parse(await readDownload('JSON'))).toMatchObject({
+      text: 'First sentence. Second sentence corrected.',
+      segments: []
+    });
+  });
+
   it('invalidates uploaded timing when live text is appended, including pending drafts', async () => {
     render(<SttApp />);
     await uploadTranscript();
@@ -197,6 +218,18 @@ describe('transcript export controls', () => {
     expect(await readDownload('TXT')).toBe('Original transcript. New live text.\n');
     expect(JSON.parse(await readDownload('JSON')).segments).toEqual([]);
     expect(getExportButton('SRT')).toBeDisabled();
+  });
+
+  it('replaces a pending live draft when a file transcription arrives', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('delta', 'Old live draft');
+    await uploadTranscript();
+
+    expect(await readDownload('TXT')).toBe('Original transcript.\n');
+    expect(JSON.parse(await readDownload('JSON'))).toEqual(uploadedTranscript);
+    expect(getExportButton('SRT')).toBeEnabled();
+    expect(getExportButton('VTT')).toBeEnabled();
   });
 
   it('disables every export when the workspace is cleared', async () => {

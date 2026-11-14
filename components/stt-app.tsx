@@ -238,6 +238,7 @@ export function SttApp() {
       if (!response.ok) throw await readApiFailure(response);
       const data = (await response.json()) as { transcript: TranscriptDocument };
       setTranscript(data.transcript);
+      setPartial('');
     },
     [fileModel, language]
   );
@@ -403,6 +404,7 @@ export function SttApp() {
 
       const data = (await response.json()) as { transcript: TranscriptDocument };
       setTranscript(data.transcript);
+      setPartial('');
       setUploadState('done');
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : 'Upload transcription failed.');

@@ -267,9 +267,12 @@ describe('transcript export controls', () => {
     render(<SttApp />);
     await startLive();
     act(() => {
-      channel.onmessage?.({ data: JSON.stringify({
-        type: 'conversation.item.input_audio_transcription.delta', delta: 'Last draft'
-      }) });
+      channel.onmessage?.({
+        data: JSON.stringify({
+          type: 'conversation.item.input_audio_transcription.delta',
+          delta: 'Last draft'
+        })
+      });
       fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     });
     emitTranscript('completed', 'Last draft');

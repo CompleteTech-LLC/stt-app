@@ -32,7 +32,7 @@ import {
   hasTimestamps,
   type TranscriptDocument
 } from '@/src/lib/transcriptExport';
-import { appendRealtimeDelta, joinTranscriptText } from '@/src/lib/liveTranscript';
+import { LiveUtterances, joinTranscriptText } from '@/src/lib/liveTranscript';
 
 type Mode = 'live' | 'upload';
 type UploadState = 'idle' | 'validating' | 'uploading' | 'done' | 'error';
@@ -146,10 +146,10 @@ const extractRealtimeText = (event: Record<string, unknown>) => {
   const type = String(event.type || '');
   if (!type.includes('transcription') && !type.includes('transcript')) return null;
 
-  const delta = event.delta || event.transcript_delta;
+  const delta = event.delta ?? event.transcript_delta;
   if (typeof delta === 'string') return { kind: 'partial' as const, text: delta };
 
-  const text = event.transcript || event.text || event.final_transcript;
+  const text = event.transcript ?? event.text ?? event.final_transcript;
   if (typeof text === 'string') {
     return {
       kind: type.includes('delta') ? ('partial' as const) : ('final' as const),
@@ -184,13 +184,11 @@ export function SttApp() {
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const fallbackChunksRef = useRef<Blob[]>([]);
-  const draftRef = useRef('');
-  const discardUtteranceRef = useRef(false);
+  const utterancesRef = useRef(new LiveUtterances());
   const liveSessionRef = useRef(0);
 
   const discardLiveDraft = useCallback(() => {
-    if (draftRef.current) discardUtteranceRef.current = true;
-    draftRef.current = '';
+    utterancesRef.current.discard();
     setPartial('');
   }, []);
 
@@ -221,8 +219,6 @@ export function SttApp() {
         model: sttModels.realtime,
         createdAt: current.createdAt || new Date().toISOString()
       }));
-      draftRef.current = '';
-      setPartial('');
     },
     [language]
   );
@@ -285,13 +281,16 @@ export function SttApp() {
   const startLive = useCallback(async () => {
     const session = ++liveSessionRef.current;
     setLiveError('');
-    draftRef.current = '';
-    discardUtteranceRef.current = false;
+    utterancesRef.current = new LiveUtterances();
     setPartial('');
     setLiveState('requesting-mic');
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (session !== liveSessionRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
       setLiveState('connecting');
 
@@ -299,6 +298,7 @@ export function SttApp() {
       peerConnectionRef.current = pc;
 
       pc.onconnectionstatechange = () => {
+        if (session !== liveSessionRef.current) return;
         if (pc.connectionState === 'connected') setLiveState('live');
         if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
           setLiveError('Realtime connection was interrupted. Stop and retry.');
@@ -311,15 +311,34 @@ export function SttApp() {
         if (session !== liveSessionRef.current) return;
         try {
           const parsed = JSON.parse(message.data as string) as Record<string, unknown>;
+          const item = parsed.item && typeof parsed.item === 'object'
+            ? (parsed.item as Record<string, unknown>) : undefined;
+          const id = parsed.item_id ?? item?.id;
+          const type = typeof parsed.type === 'string' ? parsed.type : '';
+          let committed = '';
+          if (typeof id === 'string' && id.trim()) {
+            if (type === 'conversation.item.created' && item) {
+              const content = Array.isArray(item.content) ? item.content : [];
+              const isAudio = content.some((part: unknown) =>
+                part && typeof part === 'object' && (part as Record<string, unknown>).type === 'input_audio');
+              // Only classify an item when its content is present; incomplete events remain unknown.
+              if (Array.isArray(item.content)) {
+                committed = isAudio
+                  ? utterancesRef.current.register(id, parsed.previous_item_id)
+                  : utterancesRef.current.skip(id, parsed.previous_item_id);
+              }
+            } else if (type === 'input_audio_buffer.speech_started' ||
+              type === 'input_audio_buffer.speech_stopped' || type === 'input_audio_buffer.committed') {
+              committed = utterancesRef.current.register(id, parsed.previous_item_id);
+            }
+          }
+          if (committed) applyFinalText(committed);
           const update = extractRealtimeText(parsed);
-          if (!update) return;
-          if (update.kind === 'partial') {
-            if (discardUtteranceRef.current) return;
-            draftRef.current = appendRealtimeDelta(draftRef.current, update.text);
-            setPartial(draftRef.current);
-          } else if (discardUtteranceRef.current) {
-            discardUtteranceRef.current = false;
-          } else applyFinalText(update.text);
+          if (update) {
+            committed = utterancesRef.current.update(id, update.kind, update.text, parsed.event_id);
+            if (committed) applyFinalText(committed);
+          }
+          setPartial(utterancesRef.current.preview());
         } catch {
           // Realtime data channel can include events not needed by this UI.
         }
@@ -327,7 +346,9 @@ export function SttApp() {
 
       stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
       const offer = await pc.createOffer();
+      if (session !== liveSessionRef.current) return;
       await pc.setLocalDescription(offer);
+      if (session !== liveSessionRef.current) return;
 
       const answer = await fetch(
         `/api/realtime/call?language=${encodeURIComponent(language)}&delay=low`,
@@ -340,11 +361,15 @@ export function SttApp() {
         }
       );
 
+      if (session !== liveSessionRef.current) return;
       if (!answer.ok) {
         throw await readApiFailure(answer);
       }
 
-      await pc.setRemoteDescription({ type: 'answer', sdp: await answer.text() });
+      const sdp = await answer.text();
+      if (session !== liveSessionRef.current) return;
+      await pc.setRemoteDescription({ type: 'answer', sdp });
+      if (session !== liveSessionRef.current) return;
       setTranscript((current) => ({
         ...current,
         language,
@@ -352,6 +377,7 @@ export function SttApp() {
         createdAt: current.createdAt || new Date().toISOString()
       }));
     } catch (error) {
+      if (session !== liveSessionRef.current) return;
       const message =
         error instanceof Error ? error.message : 'Realtime transcription is unavailable.';
       if (
@@ -377,9 +403,8 @@ export function SttApp() {
       return;
     }
 
-    if (draftRef.current.trim()) {
-      applyFinalText(draftRef.current);
-    }
+    const remaining = utterancesRef.current.finish();
+    if (remaining.trim()) applyFinalText(remaining);
     stopMedia();
     setPartial('');
     setLiveState('stopped');

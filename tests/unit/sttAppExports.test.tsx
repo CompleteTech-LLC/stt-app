@@ -54,11 +54,12 @@ async function startLive() {
   await screen.findByText('Listening');
 }
 
-function emitTranscript(type: 'delta' | 'completed', text: string) {
+function emitTranscript(type: 'delta' | 'completed', text: string, itemId?: string) {
   act(() => {
     channel.onmessage?.({
       data: JSON.stringify({
         type: `conversation.item.input_audio_transcription.${type}`,
+        ...(itemId ? { item_id: itemId } : {}),
         ...(type === 'delta' ? { delta: text } : { transcript: text })
       })
     });
@@ -287,5 +288,156 @@ describe('transcript export controls', () => {
     for (const format of ['TXT', 'JSON', 'SRT', 'VTT']) {
       expect(getExportButton(format)).toBeDisabled();
     }
+  });
+});
+
+describe('cancelled microphone startup', () => {
+  it('stops a stream acquired after Stop without opening a connection', async () => {
+    let resolveStream!: (stream: MediaStream) => void;
+    const pending = new Promise<MediaStream>((resolve) => { resolveStream = resolve; });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValueOnce(pending);
+    const connection = vi.fn();
+    vi.stubGlobal('RTCPeerConnection', connection);
+    render(<SttApp />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await act(async () => {
+      resolveStream({ getTracks: () => [{ stop: stopTrack }] } as unknown as MediaStream);
+      await pending;
+    });
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(connection).not.toHaveBeenCalled();
+    expect(screen.getByText('Stopped')).toBeInTheDocument();
+  });
+});
+
+
+describe('identified live items', () => {
+  it('does not block audio on a created non-audio predecessor', async () => {
+    render(<SttApp />);
+    await startLive();
+    act(() => channel.onmessage?.({ data: JSON.stringify({
+      type: 'conversation.item.created', previous_item_id: null,
+      item: { id: 'A', content: [{ type: 'input_text', text: 'hello' }] }
+    }) }));
+    act(() => channel.onmessage?.({ data: JSON.stringify({
+      type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A'
+    }) }));
+    emitTranscript('completed', 'speech', 'B');
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('speech');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(await readDownload('TXT')).toBe('speech\n');
+  });
+
+  it.each(['clear', 'edit', 'replace'] as const)(
+    'preserves %s across overlapping drafts and out-of-order completions',
+    async (action) => {
+      render(<SttApp />);
+      await startLive();
+      emitTranscript('delta', 'first draft', 'A');
+      emitTranscript('delta', 'second draft', 'B');
+      emitTranscript('completed', 'second final', 'B');
+      expect(screen.getByLabelText('Transcript text')).toHaveValue('first draft second final');
+      if (action === 'clear') fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+      if (action === 'edit') fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: 'Edited' } });
+      if (action === 'replace') await uploadTranscript();
+      emitTranscript('completed', 'first final', 'A');
+      emitTranscript('completed', 'second final', 'B');
+      emitTranscript('completed', 'new', 'C');
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(
+        action === 'clear' ? 'new' : action === 'edit' ? 'Edited new' : 'Original transcript. new'
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      expect(await readDownload('TXT')).toBe(
+        (action === 'clear' ? 'new' : action === 'edit' ? 'Edited new' : 'Original transcript. new') + '\n'
+      );
+    }
+  );
+
+  it('stops with overlapping drafts in order and ignores later completions', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('delta', 'first draft', 'A');
+    emitTranscript('delta', 'second draft', 'B');
+    emitTranscript('completed', 'second final', 'B');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    emitTranscript('completed', 'first final', 'A');
+    expect(await readDownload('TXT')).toBe('first draft second final\n');
+    expect(stopTrack).toHaveBeenCalledOnce();
+  });
+
+  it.each(['clear', 'edit', 'replace'] as const)(
+    'ignores an item registered before its first delta after %s',
+    async (action) => {
+      render(<SttApp />);
+      await startLive();
+      act(() => channel.onmessage?.({ data: JSON.stringify({
+        type: 'input_audio_buffer.speech_started', item_id: 'A'
+      }) }));
+      if (action === 'clear') fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+      if (action === 'edit') fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: 'Edited' } });
+      if (action === 'replace') await uploadTranscript();
+      emitTranscript('completed', 'new', 'B');
+      emitTranscript('completed', 'old', 'A');
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(
+        action === 'clear' ? 'new' : action === 'edit' ? 'Edited new' : 'Original transcript. new'
+      );
+    }
+  );
+});
+
+describe('cancelled connection startup', () => {
+  it('releases the connection on Stop while the answer is pending and ignores its resolution', async () => {
+    let resolveAnswer!: (answer: Response) => void;
+    const answer = new Promise<Response>((resolve) => { resolveAnswer = resolve; });
+    vi.mocked(fetch).mockReturnValueOnce(answer);
+    const close = vi.fn();
+    const setRemoteDescription = vi.fn();
+    vi.stubGlobal('RTCPeerConnection', class {
+      createDataChannel = () => channel;
+      addTrack = vi.fn();
+      createOffer = async () => ({ type: 'offer', sdp: 'offer' });
+      setLocalDescription = vi.fn();
+      setRemoteDescription = setRemoteDescription;
+      close = close;
+    });
+    render(<SttApp />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await act(async () => {
+      resolveAnswer(new Response('synthetic answer'));
+      await answer;
+    });
+    expect(close).toHaveBeenCalledOnce();
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(setRemoteDescription).not.toHaveBeenCalled();
+    expect(screen.getByText('Stopped')).toBeInTheDocument();
+  });
+
+  it('does not connect after an outstanding offer resolves', async () => {
+    let resolveOffer!: (offer: RTCSessionDescriptionInit) => void;
+    const offer = new Promise<RTCSessionDescriptionInit>((resolve) => { resolveOffer = resolve; });
+    const close = vi.fn();
+    const setLocalDescription = vi.fn();
+    vi.stubGlobal('RTCPeerConnection', class {
+      createDataChannel = () => channel;
+      addTrack = vi.fn();
+      createOffer = () => offer;
+      setLocalDescription = setLocalDescription;
+      close = close;
+    });
+    render(<SttApp />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+    await waitFor(() => expect(screen.getByText('Connecting')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await act(async () => {
+      resolveOffer({ type: 'offer', sdp: 'offer' });
+      await offer;
+    });
+    expect(close).toHaveBeenCalledOnce();
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(setLocalDescription).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

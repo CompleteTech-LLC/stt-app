@@ -21,6 +21,15 @@ text or adding live speech invalidates that alignment, so subtitle exports are d
 exports an empty `segments` list. A new file transcription can supply fresh timestamps. Realtime
 events do not supply segment timestamps, so live transcripts support TXT/JSON only.
 
+Live transcription orders items using predecessor IDs when they are available before an item
+commits. A known predecessor that never arrives or never completes can delay later finals;
+Stop flushes the available text. If ordering metadata arrives only after text was committed,
+or events lack item IDs, the original order cannot always be recovered. Repeated events with
+the same nonempty `event_id` are suppressed within a bounded recent window. Without an event
+ID, a repeated delta is indistinguishable from legitimate repeated text and is appended; a
+final transcription replaces the accumulated draft. The app does not assume IDs are present
+or that retries reuse them, and very old IDs may be forgotten in long sessions.
+
 ## Architecture
 
 - `app/api/transcribe/route.ts`: multipart upload API, size checks, rate limiting, server-side transcription.

@@ -66,6 +66,15 @@ describe('Basic credentials', () => {
     expect(getAuthenticatedUser(request(authorize('équipe:test:password:é')))).toBeUndefined();
   });
 
+  it('preserves a leading UTF-8 BOM in the configured username', () => {
+    vi.stubEnv('BASIC_AUTH_USER', '\uFEFFoperator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    expect(getAuthenticatedUser(request(authorize('\uFEFFoperator:test-password')))).toBe(
+      '\uFEFFoperator'
+    );
+    expect(getAuthenticatedUser(request(authorize()))).toBeUndefined();
+  });
+
   it.each([
     undefined,
     authorize('other:test-password'),
@@ -138,6 +147,7 @@ describe('authenticated browser mutations', () => {
 
   it('supports TLS-terminating reverse proxies that preserve Host', () => {
     enableAuth();
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'https://stt.example.com');
     expect(
       basicAuthDenial(mutation({ origin: 'https://stt.example.com', host: 'stt.example.com' }))
     ).toBeUndefined();
@@ -146,6 +156,15 @@ describe('authenticated browser mutations', () => {
         mutation({ origin: 'https://foreign.example', 'x-forwarded-host': 'foreign.example' })
       )?.status
     ).toBe(403);
+  });
+
+  it('checks the scheme and fails closed for invalid public origin configuration', () => {
+    enableAuth();
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'https://localhost');
+    expect(basicAuthDenial(mutation({ origin: 'http://localhost' }))?.status).toBe(403);
+    expect(basicAuthDenial(mutation({ origin: 'https://localhost' }))).toBeUndefined();
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'https://localhost/path');
+    expect(basicAuthDenial(mutation({ origin: 'https://localhost' }))?.status).toBe(403);
   });
 
   it('leaves the default unauthenticated mode unchanged', () => {

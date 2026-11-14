@@ -54,7 +54,7 @@ export const getAuthenticatedUser = (
 
   let credentials: string;
   try {
-    credentials = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    credentials = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch {
     return undefined;
   }
@@ -105,10 +105,20 @@ export const basicAuthDenial = (request: Request): Response | undefined => {
     if (origin !== null) {
       try {
         const parsed = new URL(origin);
-        // Compare Host, not forwarded headers: this also supports TLS terminated
-        // by a reverse proxy that preserves Host. Opaque origins fail closed.
-        const host = request.headers.get('host') || new URL(request.url).host;
-        foreignOrigin = !['http:', 'https:'].includes(parsed.protocol) || parsed.host !== host;
+        // A configured public origin is authoritative behind TLS termination.
+        // Otherwise the deployment must ensure request.url reflects the public URL.
+        const publicOrigin = process.env.BASIC_AUTH_PUBLIC_ORIGIN;
+        const target = new URL(publicOrigin || request.url);
+        const validTarget =
+          ['http:', 'https:'].includes(target.protocol) &&
+          !target.username &&
+          !target.password &&
+          (!publicOrigin ||
+            (target.pathname === '/' &&
+              !target.search &&
+              !target.hash &&
+              publicOrigin === target.origin));
+        foreignOrigin = !validTarget || origin !== parsed.origin || parsed.origin !== target.origin;
       } catch {
         foreignOrigin = true;
       }

@@ -29,6 +29,7 @@ describe('paid route authentication', () => {
     async (path, handler) => {
       vi.stubEnv('BASIC_AUTH_USER', 'operator');
       vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+      vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
       const request = new NextRequest(`http://localhost/api/${path}`, {
         method: 'POST',
         headers: {

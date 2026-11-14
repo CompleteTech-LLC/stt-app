@@ -15,6 +15,7 @@ const request = (authorization?: string, path = '/') =>
 const enableAuth = () => {
   vi.stubEnv('BASIC_AUTH_USER', 'operator');
   vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+  vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
 };
 
 afterEach(() => vi.unstubAllEnvs());
@@ -164,7 +165,11 @@ describe('authenticated browser mutations', () => {
     expect(basicAuthDenial(mutation({ origin: 'http://localhost' }))?.status).toBe(403);
     expect(basicAuthDenial(mutation({ origin: 'https://localhost' }))).toBeUndefined();
     vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'https://localhost/path');
-    expect(basicAuthDenial(mutation({ origin: 'https://localhost' }))?.status).toBe(403);
+    expect(basicAuthDenial(mutation({ origin: 'https://localhost' }))?.status).toBe(503);
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', '');
+    expect(
+      basicAuthDenial(mutation({ origin: 'http://localhost', host: 'localhost' }))?.status
+    ).toBe(503);
   });
 
   it('leaves the default unauthenticated mode unchanged', () => {

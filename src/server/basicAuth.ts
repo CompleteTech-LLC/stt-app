@@ -101,26 +101,32 @@ export const basicAuthDenial = (request: Request): Response | undefined => {
   // stop a foreign site sending a simple POST, so reject cross-site mutations.
   if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) {
     const origin = request.headers.get('origin');
+    // A browser Origin must be compared with an operator-controlled value, never
+    // Host, forwarding headers, or Next's internally reconstructed request URL.
     let foreignOrigin = false;
     if (origin !== null) {
+      const publicOrigin = process.env.BASIC_AUTH_PUBLIC_ORIGIN || '';
       try {
-        const parsed = new URL(origin);
-        // A configured public origin is authoritative behind TLS termination.
-        // Otherwise the deployment must ensure request.url reflects the public URL.
-        const publicOrigin = process.env.BASIC_AUTH_PUBLIC_ORIGIN;
-        const target = new URL(publicOrigin || request.url);
-        const validTarget =
-          ['http:', 'https:'].includes(target.protocol) &&
-          !target.username &&
-          !target.password &&
-          (!publicOrigin ||
-            (target.pathname === '/' &&
-              !target.search &&
-              !target.hash &&
-              publicOrigin === target.origin));
-        foreignOrigin = !validTarget || origin !== parsed.origin || parsed.origin !== target.origin;
+        const target = new URL(publicOrigin);
+        if (
+          !['http:', 'https:'].includes(target.protocol) ||
+          target.username ||
+          target.password ||
+          publicOrigin !== target.origin
+        ) {
+          throw new Error('Invalid public origin');
+        }
+        try {
+          const parsed = new URL(origin);
+          foreignOrigin = origin !== parsed.origin || parsed.origin !== target.origin;
+        } catch {
+          foreignOrigin = true;
+        }
       } catch {
-        foreignOrigin = true;
+        return Response.json(
+          { error: 'Application public origin is not configured correctly.' },
+          { status: 503, headers }
+        );
       }
     }
     if (foreignOrigin || request.headers.get('sec-fetch-site') === 'cross-site') {

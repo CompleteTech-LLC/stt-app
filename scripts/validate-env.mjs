@@ -26,6 +26,19 @@ if (
   process.exit(1);
 }
 
+if (username && password) {
+  const publicOrigin = process.env.BASIC_AUTH_PUBLIC_ORIGIN || '';
+  try {
+    const parsed = new URL(publicOrigin);
+    if (!['http:', 'https:'].includes(parsed.protocol) || publicOrigin !== parsed.origin) {
+      throw new Error('Invalid public origin');
+    }
+  } catch {
+    console.error('Set BASIC_AUTH_PUBLIC_ORIGIN to the exact public http(s) origin.');
+    process.exit(1);
+  }
+}
+
 const key = process.env.OPENAI_API_KEY;
 
 if (!key) {

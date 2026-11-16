@@ -13,6 +13,133 @@ Status: early prototype (version 0.1.0, not published as a package). It needs yo
 - Transcript workspace supports editing, copy, clear, TXT/JSON export, and SRT/VTT export when timestamp segments exist.
 - No persistent storage is used by default. Uploads are handled in memory and are not written to disk.
 
+### Transcript exports
+
+TXT and JSON export the text currently shown in the workspace, including live drafts and edits,
+when its order and event identity are established. A persistent live content-identity warning is
+also included if it was removed by an edit. SRT and VTT require valid original timestamps for every
+segment.
+Editing the text or adding live speech invalidates that alignment, so subtitle exports are disabled
+and JSON exports an empty `segments` list. The configured file models use JSON transcription and
+do not promise timestamp segments; synthetic timestamp fixtures are not evidence of provider
+availability. Realtime events do not supply segment timestamps. Starting live capture alone does
+not relabel an existing upload. Realtime provenance uses the same-origin `X-STT-Model` response
+header when it contains a bounded valid model identifier; otherwise its model is unknown. Combined
+text uses `model: "mixed"` when known sources differ, omits model when either is unknown, and omits
+language unless both sources share the same known, non-auto language. Fallback uses the file
+transcription response's provenance, not a presumed realtime model.
+
+Live transcription uses the documented transcription `item_id` to associate deltas, final
+transcripts and failures. An `event_id` identifies an event, not an utterance. Predecessor IDs
+order overlapping items as direct predecessor chains. An explicit null predecessor marks the first
+item; an item with an unknown predecessor is provisional and is not irreversibly committed. Late
+metadata can reorder provisional items. While their order is unconfirmed the preview is provisional
+and Copy/TXT/JSON are disabled. Stop retains available text, marking each unresolved item
+`[Live item; order unconfirmed]` so the exported sequence does not claim to be chronological.
+Editing a provisional preview fences that session, so late metadata cannot repair the edited text.
+Any nonempty edit made while provisional text is present remains unexportable until you explicitly
+confirm its displayed order or keep it with an `[Edited live text; order unconfirmed]` label. Stop
+also applies that label, even if the edit currently has no text. Use **Clear** or successfully
+replace the workspace with an upload to discard the uncertain edit; erasing the textarea alone does
+not resolve it. The label leaves the edited text and its whitespace intact.
+Editing text that already contains an uncertainty label also requires an explicit choice again,
+so removing the label in an ordinary edit cannot silently turn unconfirmed order into fact.
+Unidentified partial events have a separate event-identity uncertainty: repeated text could be
+distinct speech or a repeated delivery. Their preview is retained without text-based deduplication,
+but Copy/TXT/JSON are disabled until a valid final replaces that item's draft. Stop, channel close,
+failure, or fallback retains available unidentified partial text with an event-identity warning;
+the order warning is independent and both appear when applicable. Editing uncertain or warned text
+requires a separate explicit choice to retain the identity warning or confirm the displayed text;
+confirming order alone does not confirm event identity. Clear or a successful replacement discards it.
+Contradictory or duplicate first-item metadata, conflicting terminal events, and conflicting
+audio/non-audio identities fence the session. A failed predecessor is terminal: available partial
+text is retained, successors can continue, and the workspace shows a warning.
+Recognized non-input-audio item kinds, non-input-audio content types, and system or assistant roles
+are identity claims even when other metadata is unknown. They conflict with an input-audio claim
+for the same item ID in either arrival order; missing or unrecognized metadata alone remains neutral.
+Recognizing these claims does not enable tools or qualify live-provider behavior.
+For a created user message with exactly one `input_audio` content part, its optional reference
+transcript is not added as speech. A completed transcription for the same item must match it
+exactly, including an explicitly supplied content index of zero. If the completion arrived first,
+a matching reference can still supply predecessor metadata. If the reference arrives first, the
+app waits for its matching completion; Copy/TXT/JSON are disabled and the reference is not shown as
+accepted text. Stop or session termination omits an unconfirmed reference, visibly warns that
+speech may be missing, and retains already accepted text. The omission warning remains through
+later sessions until Clear or a successful replacement upload. Conflicting references, completions,
+or content indexes fence the session. References on other item shapes, multiple content parts,
+and other unsupported transcript-bearing payloads are not accepted.
+
+The tracker supports at most one audio content part per item. An explicit content index must be a
+nonnegative safe integer and must agree across partial, completed, and failed transcription events
+and with the position of any known audio part in created-item metadata. Multiple audio parts,
+malformed indexes, and conflicting indexes fence the session before their text or predecessor
+metadata can be merged or discarded. An index without created metadata identifies the one observed
+part; missing or unrecognized metadata is otherwise neutral. For compatibility, an event with no
+index is treated as belonging to that same part, so the app cannot distinguish multiple parts if
+their events omit indexes and no metadata reveals them. This is a conservative client policy, not a
+claim that the provider emits these shapes.
+
+When this content-identity fence is reached, already accepted text is retained, but later or
+rejected speech may be missing. The workspace, Stop result, copies, and TXT/JSON exports retain a
+content-identity warning; the warning survives edits and later sessions until Clear or a successful
+replacement upload. Timed exports are unavailable while this warning is retained.
+
+Realtime turn detection is disabled for the configured model. Press **Finish turn** after speaking
+to send an explicit `input_audio_buffer.commit`; listening continues. Each commit has a distinct
+client event ID. A new, identified server acknowledgement for an item not already acknowledged in
+this session releases the pending turn; an error does so only when its nested client event ID
+matches that turn. The server acknowledgement does not echo
+the client ID, so this assumes the one outstanding commit receives its acknowledgement before the
+next commit. An acknowledgement without a server event ID cannot safely release a turn, and a later
+acknowledgement for the same item cannot establish a new turn: Stop and retry, or wait for an
+identified acknowledgement for a new item. Wait for transcription and ordering metadata
+before pressing Stop. Stop releases capture immediately and does not wait for a commit or final
+response; any available unresolved text is retained with the labels described above. If the active
+data channel closes, capture stops and Retry is available; uncommitted audio and pending results may
+be lost, and audio already sent cannot be retracted. No recording is uploaded or turn committed
+automatically. No periodic commits are sent. These controls have synthetic coverage only, not live
+provider or browser-media qualification.
+
+Clearing, editing, or replacing the workspace during a live session fences **all subsequent events
+from that session**, including events for unknown predecessors. Missing or conflicting item IDs,
+malformed tracked events, unexpected transcript fields, contradictory ordering, or resource limits
+also pause acceptance of further events rather than guessing their identity or order. A visible
+message asks you to Stop and Start a new session; the microphone is not automatically stopped by
+this realtime transcript fence. If microphone permission or realtime setup is still pending, a
+workspace edit, clear, or successful replacement upload instead retires that setup and stops any
+acquired capture; that session cannot later start fallback recording. During local fallback
+recording, the same actions stop capture and discard the recording before upload, so it will not be
+transcribed. If fallback transcription is already in flight, cancellation is best effort: the result
+is discarded, but audio already sent cannot be retracted and may already have been transcribed.
+A successful fallback transcription appends to existing text and any
+retained live draft instead of replacing them. Retry while fallback recording discards that recording
+and reports the disposition. If a recorder stops unexpectedly, capture is released immediately and
+its audio stays in this tab until you choose **Transcribe recording** or **Discard recording**; it
+is not uploaded automatically. If recording reports an error, only chunks already received are
+retained for this choice and they may be incomplete. An older upload cannot replace a later edit,
+clear, new upload, or live session. Text in rejected events is not captured and may need to be
+repeated in the new session.
+
+For one session, the tracker retains at most 1,024 item IDs (including referenced predecessors),
+4,096 event IDs, and 1,000,000 UTF-16 code units each of pending transcript and reference text
+combined, resolved item text, and serialized event payloads retained for deduplication. Each item or
+event ID is limited to 256 code units. A data-channel message over 1,100,000 code units is also
+refused before JSON parsing.
+Reaching a limit fences the session instead of evicting IDs that could still be needed to reject
+late events. All observed server event kinds share the same event-ID space. Exact repeated payloads
+with the same nonempty `event_id` are suppressed before ordering or turn state changes; conflicting
+or malformed IDs fence the session. Payloads are
+retained only in bounded browser-session memory, not displayed or logged, and released when the
+tracker finishes or the workspace changes. Omitted event IDs are treated as unidentified; a present null ID is malformed:
+registration metadata can still establish order, but an unidentified acknowledgement cannot
+release a pending turn. Without an event ID, a repeated delta is indistinguishable from legitimate
+repeated text and is appended with the uncertainty treatment above; a final transcript replaces the
+item's accumulated draft. Acknowledged item IDs are tracked separately within the item limit. An
+uncorrelated error leaves the turn pending and reports an unknown outcome with Stop/retry guidance;
+it is not proof of commit failure. A safely handled server error with no pending turn shows fixed
+guidance to check the transcript or Stop and retry if needed; it does not assert that a particular
+turn or the session failed. These rules have synthetic test coverage, not live provider qualification.
+
 ## Architecture
 
 - `app/api/transcribe/route.ts`: multipart upload API, size checks, rate limiting, server-side transcription.

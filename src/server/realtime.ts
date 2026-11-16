@@ -1,30 +1,20 @@
 import 'server-only';
 
 import { getServerConfig, requireOpenAIKey } from '@/src/lib/config';
-import { AppError } from '@/src/lib/errors';
+import { AppError, getUpstreamStatus } from '@/src/lib/errors';
 
 type RealtimeInput = {
   language: string;
   delay: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   safetyIdentifier?: string;
+  signal?: AbortSignal;
 };
 
-const parseOpenAIError = (body: string): { message?: string; code?: string } => {
+const cancelResponseBody = (response: Response) => {
   try {
-    const parsed = JSON.parse(body) as {
-      error?: {
-        message?: string;
-        code?: string;
-        type?: string;
-      };
-    };
-
-    return {
-      message: parsed.error?.message,
-      code: parsed.error?.code || parsed.error?.type
-    };
+    void response.body?.cancel().catch(() => undefined);
   } catch {
-    return {};
+    return;
   }
 };
 
@@ -54,6 +44,10 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
   );
 
   try {
+    const signal = input.signal
+      ? AbortSignal.any([controller.signal, input.signal])
+      : controller.signal;
+    signal.throwIfAborted();
     const response = await fetch('https://api.openai.com/v1/realtime/calls', {
       method: 'POST',
       headers: {
@@ -61,26 +55,29 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
         ...(input.safetyIdentifier ? { 'OpenAI-Safety-Identifier': input.safetyIdentifier } : {})
       },
       body: form,
-      signal: controller.signal
+      signal
     });
 
-    const body = await response.text();
+    if (!response.ok || signal.aborted) cancelResponseBody(response);
+    signal.throwIfAborted();
 
     if (!response.ok) {
-      const upstream = parseOpenAIError(body);
+      const upstreamStatus = getUpstreamStatus(response.status);
       throw new AppError(
         'UPSTREAM_ERROR',
-        response.status === 401
+        upstreamStatus === 401
           ? 'OpenAI rejected the server API key.'
-          : upstream.message
-            ? `Could not establish realtime transcription session. OpenAI returned HTTP ${response.status}: ${upstream.message}`
-            : `Could not establish realtime transcription session. OpenAI returned HTTP ${response.status}. Verify the OpenAI project has active billing and access to realtime transcription.`,
-        response.status === 401 ? 503 : 502,
-        response.status >= 500,
-        response.status,
-        upstream.code
+          : upstreamStatus === undefined
+            ? 'Could not establish realtime transcription session. Verify the OpenAI project has active billing and access to realtime transcription.'
+            : `Could not establish realtime transcription session. OpenAI returned HTTP ${upstreamStatus}. Verify the OpenAI project has active billing and access to realtime transcription.`,
+        upstreamStatus === 401 ? 503 : 502,
+        upstreamStatus !== undefined && upstreamStatus >= 500,
+        upstreamStatus
       );
     }
+
+    const body = await response.text();
+    signal.throwIfAborted();
 
     if (!body.trim().startsWith('v=')) {
       throw new AppError(
@@ -94,6 +91,11 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
       sdp: body,
       model: config.models.realtime
     };
+  } catch (error) {
+    if (controller.signal.aborted && !input.signal?.aborted && !(error instanceof AppError)) {
+      controller.signal.throwIfAborted();
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }

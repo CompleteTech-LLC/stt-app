@@ -24,42 +24,44 @@ export class AppError extends Error {
   }
 }
 
-const getString = (value: unknown) => (typeof value === 'string' ? value : undefined);
+export const getUpstreamStatus = (status: unknown): number | undefined =>
+  typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+    ? status
+    : undefined;
 
-const getOpenAIErrorDetails = (error: Error) => {
-  const candidate = error as {
-    status?: number;
-    code?: string;
-    type?: string;
-    error?: {
-      code?: string;
-      type?: string;
-      message?: string;
-    };
-  };
+const timeoutError = () =>
+  new AppError('TIMEOUT', 'The transcription request timed out. Try a shorter file.', 504, true);
 
-  return {
-    status: candidate.status,
-    code: candidate.code || candidate.type || candidate.error?.code || candidate.error?.type,
-    message: getString(candidate.error?.message) || getString(error.message)
-  };
-};
-
-export const toAppError = (error: unknown): AppError => {
-  if (error instanceof AppError) return error;
+export const toAppError = (error: unknown, signal?: AbortSignal): AppError => {
+  if (error instanceof AppError && !(signal?.aborted && error === signal.reason)) return error;
+  if (signal?.aborted) return timeoutError();
 
   if (error instanceof ZodError) {
     return new AppError('BAD_REQUEST', error.issues[0]?.message || 'Invalid request.', 400);
   }
 
   if (error instanceof Error) {
-    if (error.name === 'AbortError' || error.message.toLowerCase().includes('timeout')) {
+    const upstreamStatus = getUpstreamStatus((error as { status?: unknown }).status);
+    if (upstreamStatus !== undefined) {
       return new AppError(
-        'TIMEOUT',
-        'The transcription request timed out. Try a shorter file.',
-        504,
-        true
+        'UPSTREAM_ERROR',
+        upstreamStatus === 401
+          ? 'OpenAI rejected the server API key.'
+          : `OpenAI transcription service returned HTTP ${upstreamStatus}. Check the OpenAI project configuration and access, or retry later.`,
+        upstreamStatus === 401 ? 503 : 502,
+        upstreamStatus >= 500,
+        upstreamStatus
       );
+    }
+
+    if (
+      error.name === 'AbortError' ||
+      error.name === 'TimeoutError' ||
+      error.name === 'APIConnectionTimeoutError' ||
+      error.message.toLowerCase().includes('timeout') ||
+      /\btimed[\s-]+out\b/i.test(error.message)
+    ) {
+      return timeoutError();
     }
 
     if (error.message === 'OPENAI_API_KEY is missing') {
@@ -67,23 +69,6 @@ export const toAppError = (error: unknown): AppError => {
         'MISSING_API_KEY',
         'OpenAI API key is not configured on the server.',
         503
-      );
-    }
-
-    const upstream = getOpenAIErrorDetails(error);
-    const maybeStatus = upstream.status;
-    if (maybeStatus && maybeStatus >= 400) {
-      return new AppError(
-        'UPSTREAM_ERROR',
-        maybeStatus === 401
-          ? 'OpenAI rejected the server API key.'
-          : upstream.message
-            ? `OpenAI transcription service returned HTTP ${maybeStatus}: ${upstream.message}`
-            : `OpenAI transcription service returned HTTP ${maybeStatus}.`,
-        maybeStatus === 401 ? 503 : 502,
-        maybeStatus >= 500,
-        maybeStatus,
-        upstream.code
       );
     }
   }

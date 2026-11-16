@@ -21,11 +21,13 @@ export async function POST(request: NextRequest) {
   if (denied) return denied;
 
   try {
+    request.signal.throwIfAborted();
     const config = getServerConfig();
     assertRateLimit(request, 'transcribe');
     validateRequestSize(request.headers.get('content-length'), config.limits.maxUploadBytes);
 
     const form = await request.formData();
+    request.signal.throwIfAborted();
     const file = form.get('file');
 
     if (!(file instanceof File)) {
@@ -44,6 +46,7 @@ export async function POST(request: NextRequest) {
       prompt: form.get('prompt')?.toString() || undefined
     });
 
+    request.signal.throwIfAborted();
     logger.info('transcription_started', {
       size: metadata.size,
       type: metadata.type,
@@ -55,8 +58,10 @@ export async function POST(request: NextRequest) {
       file,
       language: fields.language,
       model: fields.model,
-      prompt: fields.prompt
+      prompt: fields.prompt,
+      signal: request.signal
     });
+    request.signal.throwIfAborted();
 
     logger.info('transcription_completed', {
       size: metadata.size,
@@ -68,7 +73,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ transcript });
   } catch (error) {
-    const appError = toAppError(error);
+    const appError = toAppError(error, request.signal);
     logger.error('transcription_failed', {
       code: appError.code,
       status: appError.status,

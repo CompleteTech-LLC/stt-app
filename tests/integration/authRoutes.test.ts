@@ -17,6 +17,7 @@ vi.mock('@/src/server/realtime', () => ({ createRealtimeCallAnswer: vi.fn() }));
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.clearAllMocks();
+  vi.mocked(transcribeFile).mockReset();
   resetRateLimits();
 });
 
@@ -89,6 +90,202 @@ describe('paid route authentication', () => {
         safetyIdentifier: expect.stringMatching(/^[0-9a-f]{32}$/)
       })
     );
+  });
+
+  it('forwards authenticated request cancellation to realtime processing', async () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
+    vi.mocked(createRealtimeCallAnswer).mockResolvedValue({ sdp: 'v=0\r\n', model: 'test-model' });
+    const controller = new AbortController();
+    const request = new NextRequest('http://localhost/api/realtime/call', {
+      method: 'POST',
+      headers: {
+        authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`
+      },
+      body: 'v=0\r\n',
+      signal: controller.signal
+    });
+
+    expect((await realtimeCall(request)).status).toBe(200);
+    const input = vi.mocked(createRealtimeCallAnswer).mock.calls[0][0];
+    expect(input.signal).toBe(request.signal);
+    controller.abort();
+    expect(input.signal?.aborted).toBe(true);
+  });
+
+  it('checks authentication before a pre-aborted transcription request', async () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
+    const controller = new AbortController();
+    controller.abort();
+    const request = new NextRequest('http://localhost/api/transcribe', {
+      method: 'POST',
+      signal: controller.signal
+    });
+    const readForm = vi.spyOn(request, 'formData');
+
+    expect((await transcribe(request)).status).toBe(401);
+    expect(readForm).not.toHaveBeenCalled();
+    expect(transcribeFile).not.toHaveBeenCalled();
+  });
+
+  it('stops an authenticated pre-aborted upload before parsing or upstream work', async () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
+    const controller = new AbortController();
+    controller.abort();
+    const request = new NextRequest('http://localhost/api/transcribe', {
+      method: 'POST',
+      headers: {
+        authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`
+      },
+      signal: controller.signal
+    });
+    const readForm = vi.spyOn(request, 'formData');
+
+    const response = await transcribe(request);
+    expect(response.status).toBe(504);
+    expect((await response.json()).error.code).toBe('TIMEOUT');
+    expect(readForm).not.toHaveBeenCalled();
+    expect(transcribeFile).not.toHaveBeenCalled();
+  });
+
+  it('stops an upload cancelled while its form is being read', async () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
+    const controller = new AbortController();
+    const request = new NextRequest('http://localhost/api/transcribe', {
+      method: 'POST',
+      headers: {
+        authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`
+      },
+      signal: controller.signal
+    });
+    let finishForm!: (form: FormData) => void;
+    vi.spyOn(request, 'formData').mockImplementation(
+      () => new Promise((resolve) => (finishForm = resolve))
+    );
+    const form = new FormData();
+    form.set('file', new File(['fake audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
+
+    const pending = transcribe(request);
+    controller.abort();
+    finishForm(form);
+    expect((await pending).status).toBe(504);
+    expect(transcribeFile).not.toHaveBeenCalled();
+  });
+
+  it('propagates authenticated upload cancellation through the real adapter to the mocked SDK', async () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
+    const actual = await vi.importActual<typeof import('@/src/server/fileTranscription')>(
+      '@/src/server/fileTranscription'
+    );
+    const listenerRemoved = vi.fn();
+    let upstreamStarted!: (signal: AbortSignal) => void;
+    const started = new Promise<AbortSignal>((resolve) => (upstreamStarted = resolve));
+    const create = vi.fn((_body: unknown, options: { signal: AbortSignal }) => {
+      upstreamStarted(options.signal);
+      return new Promise((_resolve, reject) => {
+        const onAbort = () => {
+          options.signal.removeEventListener('abort', onAbort);
+          listenerRemoved();
+          reject(new DOMException('Aborted', 'AbortError'));
+        };
+        options.signal.addEventListener('abort', onAbort);
+      });
+    });
+    const client = { audio: { transcriptions: { create } } };
+    vi.mocked(transcribeFile).mockImplementation((input) =>
+      actual.transcribeFile(input, client as never)
+    );
+    const form = new FormData();
+    form.set('file', new File(['fake audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
+    const controller = new AbortController();
+    const request = new NextRequest('http://localhost/api/transcribe', {
+      method: 'POST',
+      headers: {
+        authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`
+      },
+      body: form,
+      signal: controller.signal
+    });
+
+    const pending = transcribe(request);
+    const upstreamSignal = await started;
+    expect(vi.mocked(transcribeFile).mock.calls[0][0].signal).toBe(request.signal);
+    expect(create.mock.calls[0][1]).toEqual({ signal: request.signal });
+    expect(upstreamSignal.aborted).toBe(false);
+    controller.abort();
+    const response = await pending;
+    expect(response.status).toBe(504);
+    expect(upstreamSignal.aborted).toBe(true);
+    expect(listenerRemoved).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the existing timeout response for authenticated uploads', async () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
+    vi.mocked(transcribeFile).mockRejectedValue(new Error('Request timed out.'));
+    const form = new FormData();
+    form.set('file', new File(['fake audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
+    const controller = new AbortController();
+    const request = new NextRequest('http://localhost/api/transcribe', {
+      method: 'POST',
+      headers: {
+        authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`
+      },
+      body: form,
+      signal: controller.signal
+    });
+
+    const response = await transcribe(request);
+    expect(response.status).toBe(504);
+    expect((await response.json()).error.code).toBe('TIMEOUT');
+    expect(vi.mocked(transcribeFile).mock.calls[0][0].signal).toBe(request.signal);
+    expect(controller.signal.aborted).toBe(false);
+  });
+
+  it('keeps upstream error mapping and excludes upload content from logs', async () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
+    const providerMessage = 'synthetic-provider-private-message';
+    const prompt = 'synthetic-private-prompt';
+    const audio = 'synthetic-private-audio';
+    const error = Object.assign(new Error(providerMessage), { status: 503 });
+    vi.mocked(transcribeFile).mockRejectedValue(error);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const infoLog = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      const form = new FormData();
+      form.set('file', new File([audio], 'meeting.mp3', { type: 'audio/mpeg' }));
+      form.set('prompt', prompt);
+      const response = await transcribe(
+        new NextRequest('http://localhost/api/transcribe', {
+          method: 'POST',
+          headers: {
+            authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`
+          },
+          body: form
+        })
+      );
+      expect(response.status).toBe(502);
+      expect((await response.json()).error.code).toBe('UPSTREAM_ERROR');
+      const logs = JSON.stringify([...errorLog.mock.calls, ...infoLog.mock.calls]);
+      expect(logs).not.toContain(providerMessage);
+      expect(logs).not.toContain(prompt);
+      expect(logs).not.toContain(audio);
+    } finally {
+      errorLog.mockRestore();
+      infoLog.mockRestore();
+    }
   });
 });
 

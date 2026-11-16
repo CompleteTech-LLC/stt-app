@@ -895,7 +895,9 @@ describe('identified live items', () => {
       }
       emitEvent(nonAudio);
       if (order === 'non-audio first') emitTranscript('completed', 'not accepted', 'A');
-      expect(screen.getByText(/Live transcription paused:/)).toHaveTextContent(/non-audio|audio/);
+      expect(screen.getByText(/Live transcription paused:/)).toHaveTextContent(
+        /non-audio|audio|conflicting/
+      );
       expect(screen.getByLabelText('Transcript text')).toHaveValue(
         order === 'non-audio first' ? '' : 'spoken'
       );

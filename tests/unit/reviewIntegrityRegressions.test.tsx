@@ -454,13 +454,11 @@ describe('timestamp and provenance integrity', () => {
         rejectAnswer = reject;
       });
       const answerText = vi.fn(() => pendingAnswer);
-      realtimeResponses.push(() =>
-        Promise.resolve({
-          ok: true,
-          headers: new Headers({ 'X-STT-Model': 'synthetic-selected' }),
-          text: answerText
-        } as Response)
-      );
+      const delayedAnswer = new Response('', {
+        headers: { 'X-STT-Model': 'synthetic-selected' }
+      });
+      Object.defineProperty(delayedAnswer, 'text', { value: answerText });
+      realtimeResponses.push(() => Promise.resolve(delayedAnswer));
       render(<SttApp />);
       fireEvent.click(screen.getByRole('button', { name: 'Start' }));
       await waitFor(() => expect(answerText).toHaveBeenCalledOnce());

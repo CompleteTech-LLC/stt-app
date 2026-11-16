@@ -34,6 +34,7 @@ import {
 } from '@/src/lib/transcriptExport';
 import {
   LiveUtterances,
+  incompleteLiveContentLabel,
   joinTranscriptText,
   unconfirmedLiveIdentityLabel
 } from '@/src/lib/liveTranscript';
@@ -268,6 +269,7 @@ export function SttApp() {
   const [identityUncertain, setIdentityUncertain] = useState(false);
   const [referencePending, setReferencePending] = useState(false);
   const [referenceOmitted, setReferenceOmitted] = useState(false);
+  const [contentOmitted, setContentOmitted] = useState(false);
   const [editedOrderUncertain, setEditedOrderUncertain] = useState(false);
   const [editedIdentityUncertain, setEditedIdentityUncertain] = useState(false);
   const [channelReady, setChannelReady] = useState(false);
@@ -298,14 +300,22 @@ export function SttApp() {
 
   const transcriptText = transcript.text;
   const displayedTranscriptText = joinTranscriptText(transcriptText, partial);
-  const exportDocument = appendDocumentText(transcript, partial, liveModel, liveLanguage);
+  const currentDocument = appendDocumentText(transcript, partial, liveModel, liveLanguage);
+  const exportDocument =
+    contentOmitted && !currentDocument.text.includes(incompleteLiveContentLabel)
+      ? {
+          ...currentDocument,
+          text: `${currentDocument.text}${currentDocument.text ? '\n\n' : ''}${incompleteLiveContentLabel}`,
+          segments: []
+        }
+      : currentDocument;
   const exportUncertain =
     orderUncertain ||
     editedOrderUncertain ||
     identityUncertain ||
     editedIdentityUncertain ||
     referencePending;
-  const canExportTimed = !exportUncertain && hasTimestamps(exportDocument);
+  const canExportTimed = !exportUncertain && !contentOmitted && hasTimestamps(exportDocument);
   const liveStatus = liveStatusCopy[liveState];
 
   const fileHelp = useMemo(
@@ -325,6 +335,7 @@ export function SttApp() {
   const finishLiveTracker = useCallback(() => {
     const tracker = utterancesRef.current;
     if (tracker.referenceUncertain) setReferenceOmitted(true);
+    if (tracker.contentIncomplete) setContentOmitted(true);
     setReferencePending(false);
     return tracker.finish();
   }, []);
@@ -391,6 +402,7 @@ export function SttApp() {
     }
     const tracker = utterancesRef.current;
     if (tracker.referenceUncertain) setReferenceOmitted(true);
+    if (tracker.contentIncomplete) setContentOmitted(true);
     setReferencePending(false);
     tracker.discard();
     setPartial('');
@@ -677,6 +689,14 @@ export function SttApp() {
       channel.onmessage = (message) => {
         if (!ownsChannel()) return;
         const tracker = utterancesRef.current;
+        const syncTracker = () => {
+          if (tracker.error) setTrackerNotice(tracker.error);
+          if (tracker.contentIncomplete) setContentOmitted(true);
+          setPartial(tracker.preview());
+          setOrderUncertain(tracker.orderUncertain);
+          setIdentityUncertain(tracker.identityUncertain);
+          setReferencePending(tracker.referenceUncertain);
+        };
         try {
           if (typeof message.data !== 'string' || message.data.length > 1_100_000) {
             throw new Error('Malformed realtime event');
@@ -694,6 +714,21 @@ export function SttApp() {
           if (!type) throw new Error('Malformed realtime event');
           const content = Array.isArray(item?.content) ? item.content : [];
           const isCreated = type === 'conversation.item.created';
+          let audioPartIndex = -1;
+          let audioPartCount = 0;
+          if (isCreated) {
+            content.forEach((part: unknown, index: number) => {
+              if (
+                part &&
+                typeof part === 'object' &&
+                !Array.isArray(part) &&
+                (part as Record<string, unknown>).type === 'input_audio'
+              ) {
+                audioPartIndex = index;
+                audioPartCount += 1;
+              }
+            });
+          }
           const onlyPart = content[0];
           const referencePart =
             isCreated &&
@@ -716,12 +751,19 @@ export function SttApp() {
           const isTranscriptionEvent = type.startsWith(
             'conversation.item.input_audio_transcription.'
           );
+          if (isCreated && audioPartCount > 1) {
+            tracker.rejectContent('an item contains multiple unsupported audio content parts.');
+          } else if (isCreated && audioPartCount === 1) {
+            tracker.validateContentIndex(item?.id, audioPartIndex);
+          } else if (isTranscriptionEvent) {
+            tracker.validateContentIndex(parsed.item_id, parsed.content_index);
+          }
           const eventIdentity = tracker.trackEvent(
             parsed.event_id,
             parsed.event_id == null ? '' : serializeRealtimeEvent(parsed)
           );
           if (eventIdentity === 'duplicate' || eventIdentity === 'rejected') {
-            if (tracker.error) setTrackerNotice(tracker.error);
+            syncTracker();
             return;
           }
           const hasTextFields = [
@@ -786,12 +828,7 @@ export function SttApp() {
           ) {
             tracker.reject('an event contains conflicting item IDs.');
           } else if (isCreated) {
-            const isAudio = content.some(
-              (part: unknown) =>
-                part &&
-                typeof part === 'object' &&
-                (part as Record<string, unknown>).type === 'input_audio'
-            );
+            const isAudio = audioPartIndex !== -1;
             const hasNonAudioContent = content.some((part: unknown) => {
               if (!part || typeof part !== 'object') return false;
               const partType = (part as Record<string, unknown>).type;
@@ -814,7 +851,9 @@ export function SttApp() {
                       parsed.previous_item_id,
                       referenceTranscript
                     )
-                  : tracker.register(item?.id, parsed.previous_item_id, isAudio);
+                  : isAudio
+                    ? tracker.registerAudioPart(item?.id, parsed.previous_item_id, audioPartIndex)
+                    : tracker.register(item?.id, parsed.previous_item_id);
             }
           } else if (isAudioBufferEvent) {
             committed = tracker.register(parsed.item_id, parsed.previous_item_id, true);
@@ -830,7 +869,12 @@ export function SttApp() {
             ) {
               tracker.reject('a transcription failure event contained unexpected text.');
             } else {
-              committed = tracker.fail(parsed.item_id, parsed.previous_item_id);
+              committed = tracker.fail(
+                parsed.item_id,
+                parsed.previous_item_id,
+                undefined,
+                parsed.content_index
+              );
               if (committed) applyFinalText(committed);
               if (!tracker.error) {
                 setTrackerNotice(
@@ -900,11 +944,7 @@ export function SttApp() {
         } catch {
           tracker.reject('a realtime event was malformed or too large.');
         }
-        if (tracker.error) setTrackerNotice(tracker.error);
-        setPartial(tracker.preview());
-        setOrderUncertain(tracker.orderUncertain);
-        setIdentityUncertain(tracker.identityUncertain);
-        setReferencePending(tracker.referenceUncertain);
+        syncTracker();
       };
 
       stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
@@ -1151,6 +1191,7 @@ export function SttApp() {
       discardLiveDraft();
       setReferencePending(false);
       setReferenceOmitted(false);
+      setContentOmitted(false);
       resolveEditedOrder(false);
       resolveEditedIdentity(false);
       labeledOrderUncertainRef.current = false;
@@ -1176,6 +1217,7 @@ export function SttApp() {
     discardLiveDraft();
     setReferencePending(false);
     setReferenceOmitted(false);
+    setContentOmitted(false);
     setUploadError('');
     setLiveError('');
   };
@@ -1395,8 +1437,8 @@ export function SttApp() {
                 type="button"
                 title="Copy transcript"
                 aria-label="Copy transcript"
-                onClick={() => navigator.clipboard.writeText(displayedTranscriptText)}
-                disabled={!displayedTranscriptText || exportUncertain}
+                onClick={() => navigator.clipboard.writeText(exportDocument.text)}
+                disabled={!exportDocument.text || exportUncertain}
               >
                 <Clipboard size={18} aria-hidden />
               </button>
@@ -1444,9 +1486,17 @@ export function SttApp() {
               discardLiveDraft();
             }}
           />
-          {trackerNotice ? (
+          {trackerNotice || contentOmitted ? (
             <p className="error" role="alert">
               {trackerNotice}
+              {trackerNotice && contentOmitted ? ' ' : ''}
+              {contentOmitted ? (
+                <>
+                  Unsupported or conflicting live audio content may be missing. The content-identity
+                  warning is retained in copies and TXT/JSON exports until Clear or a successful
+                  replacement upload.
+                </>
+              ) : null}
             </p>
           ) : null}
           {referencePending ? (
@@ -1530,7 +1580,7 @@ export function SttApp() {
             <button
               type="button"
               onClick={() => download('transcript.txt', exportTxt(exportDocument), 'text/plain')}
-              disabled={!displayedTranscriptText || exportUncertain}
+              disabled={!exportDocument.text || exportUncertain}
             >
               <Download size={17} aria-hidden />
               TXT
@@ -1540,7 +1590,7 @@ export function SttApp() {
               onClick={() =>
                 download('transcript.json', exportJson(exportDocument), 'application/json')
               }
-              disabled={!displayedTranscriptText || exportUncertain}
+              disabled={!exportDocument.text || exportUncertain}
             >
               <Download size={17} aria-hidden />
               JSON

@@ -16,8 +16,9 @@ Status: early prototype (version 0.1.0, not published as a package). It needs yo
 ### Transcript exports
 
 TXT and JSON export the text currently shown in the workspace, including live drafts and edits,
-when its order and event identity are established. SRT and VTT require valid original timestamps
-for every segment.
+when its order and event identity are established. A persistent live content-identity warning is
+also included if it was removed by an edit. SRT and VTT require valid original timestamps for every
+segment.
 Editing the text or adding live speech invalidates that alignment, so subtitle exports are disabled
 and JSON exports an empty `segments` list. The configured file models use JSON transcription and
 do not promise timestamp segments; synthetic timestamp fixtures are not evidence of provider
@@ -67,6 +68,21 @@ speech may be missing, and retains already accepted text. The omission warning r
 later sessions until Clear or a successful replacement upload. Conflicting references, completions,
 or content indexes fence the session. References on other item shapes, multiple content parts,
 and other unsupported transcript-bearing payloads are not accepted.
+
+The tracker supports at most one audio content part per item. An explicit content index must be a
+nonnegative safe integer and must agree across partial, completed, and failed transcription events
+and with the position of any known audio part in created-item metadata. Multiple audio parts,
+malformed indexes, and conflicting indexes fence the session before their text or predecessor
+metadata can be merged or discarded. An index without created metadata identifies the one observed
+part; missing or unrecognized metadata is otherwise neutral. For compatibility, an event with no
+index is treated as belonging to that same part, so the app cannot distinguish multiple parts if
+their events omit indexes and no metadata reveals them. This is a conservative client policy, not a
+claim that the provider emits these shapes.
+
+When this content-identity fence is reached, already accepted text is retained, but later or
+rejected speech may be missing. The workspace, Stop result, copies, and TXT/JSON exports retain a
+content-identity warning; the warning survives edits and later sessions until Clear or a successful
+replacement upload. Timed exports are unavailable while this warning is retained.
 
 Realtime turn detection is disabled for the configured model. Press **Finish turn** after speaking
 to send an explicit `input_audio_buffer.commit`; listening continues. Each commit has a distinct

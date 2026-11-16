@@ -57,6 +57,16 @@ Recognized non-input-audio item kinds, non-input-audio content types, and system
 are identity claims even when other metadata is unknown. They conflict with an input-audio claim
 for the same item ID in either arrival order; missing or unrecognized metadata alone remains neutral.
 Recognizing these claims does not enable tools or qualify live-provider behavior.
+For a created user message with exactly one `input_audio` content part, its optional reference
+transcript is not added as speech. A completed transcription for the same item must match it
+exactly, including an explicitly supplied content index of zero. If the completion arrived first,
+a matching reference can still supply predecessor metadata. If the reference arrives first, the
+app waits for its matching completion; Copy/TXT/JSON are disabled and the reference is not shown as
+accepted text. Stop or session termination omits an unconfirmed reference, visibly warns that
+speech may be missing, and retains already accepted text. The omission warning remains through
+later sessions until Clear or a successful replacement upload. Conflicting references, completions,
+or content indexes fence the session. References on other item shapes, multiple content parts,
+and other unsupported transcript-bearing payloads are not accepted.
 
 Realtime turn detection is disabled for the configured model. Press **Finish turn** after speaking
 to send an explicit `input_audio_buffer.commit`; listening continues. Each commit has a distinct
@@ -95,9 +105,10 @@ clear, new upload, or live session. Text in rejected events is not captured and 
 repeated in the new session.
 
 For one session, the tracker retains at most 1,024 item IDs (including referenced predecessors),
-4,096 event IDs, and 1,000,000 UTF-16 code units each of pending transcript text, resolved item
-text, and serialized event payloads retained for deduplication. Each item or event ID is limited to
-256 code units. A data-channel message over 1,100,000 code units is also refused before JSON parsing.
+4,096 event IDs, and 1,000,000 UTF-16 code units each of pending transcript and reference text
+combined, resolved item text, and serialized event payloads retained for deduplication. Each item or
+event ID is limited to 256 code units. A data-channel message over 1,100,000 code units is also
+refused before JSON parsing.
 Reaching a limit fences the session instead of evicting IDs that could still be needed to reject
 late events. All observed server event kinds share the same event-ID space. Exact repeated payloads
 with the same nonempty `event_id` are suppressed before ordering or turn state changes; conflicting
@@ -109,8 +120,9 @@ release a pending turn. Without an event ID, a repeated delta is indistinguishab
 repeated text and is appended with the uncertainty treatment above; a final transcript replaces the
 item's accumulated draft. Acknowledged item IDs are tracked separately within the item limit. An
 uncorrelated error leaves the turn pending and reports an unknown outcome with Stop/retry guidance;
-it is not proof of commit failure. These rules have synthetic test coverage, not live provider
-qualification.
+it is not proof of commit failure. A safely handled server error with no pending turn shows fixed
+guidance to check the transcript or Stop and retry if needed; it does not assert that a particular
+turn or the session failed. These rules have synthetic test coverage, not live provider qualification.
 
 ## Architecture
 

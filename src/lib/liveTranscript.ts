@@ -21,6 +21,9 @@ type LiveItem = {
   final: boolean;
   audio: boolean;
   identityUncertain: boolean;
+  reference?: string;
+  referenceConfirmed?: boolean;
+  contentIndex?: number | null;
   previous?: string;
   previousKnown: boolean;
   terminal?: 'non-audio' | 'failed';
@@ -41,6 +44,8 @@ type ResolvedItem = {
   previous?: string;
   previousKnown: boolean;
   text: string;
+  referenceConfirmed?: boolean;
+  contentIndex?: number | null;
 };
 
 export class LiveUtterances {
@@ -225,7 +230,9 @@ export class LiveUtterances {
         order: this.resolved.size,
         previous: item.previous,
         previousKnown: item.previousKnown,
-        text: item.text
+        text: item.text,
+        referenceConfirmed: item.referenceConfirmed,
+        contentIndex: item.contentIndex
       });
       this.lastResolvedId = item.id;
       this.resolvedTextLength += item.text.length;
@@ -263,6 +270,47 @@ export class LiveUtterances {
 
   register(value: unknown, previous?: unknown, audio = false) {
     return this.transact(() => this.registerItem(value, previous, audio));
+  }
+
+  registerReference(value: unknown, previous: unknown, text: string) {
+    return this.transact(() => {
+      const item = this.items.find((entry) => entry.id === value);
+      const resolved = typeof value === 'string' ? this.resolved.get(value) : undefined;
+      const target = item ?? resolved;
+      if (target?.contentIndex !== undefined && target.contentIndex !== 0) {
+        this.reject('a reference transcript has a conflicting content index.');
+        return '';
+      }
+      if (resolved || item?.final) {
+        if (
+          (resolved && resolved.terminal !== 'final') ||
+          item?.terminal ||
+          target?.text !== text
+        ) {
+          this.reject('a reference transcript conflicts with the completed transcription.');
+          return '';
+        }
+        if (target) target.referenceConfirmed = true;
+      } else {
+        if (item?.reference !== undefined && item.reference !== text) {
+          this.reject('an item has conflicting reference transcripts.');
+          return '';
+        }
+        const pendingLength = this.items.reduce(
+          (sum, entry) => sum + entry.text.length + (entry.reference?.length ?? 0),
+          0
+        );
+        if (pendingLength + (item?.reference === undefined ? text.length : 0) > MAX_PENDING_TEXT) {
+          this.reject('the pending text limit was reached.');
+          return '';
+        }
+      }
+      const committed = this.registerItem(value, previous, true);
+      if (this.halted || typeof value !== 'string') return committed;
+      const pending = this.items.find((entry) => entry.id === value);
+      if (pending && !pending.final) pending.reference = text;
+      return committed;
+    });
   }
 
   private registerItem(value: unknown, previous?: unknown, audio = false) {
@@ -387,12 +435,34 @@ export class LiveUtterances {
     text: string,
     eventId?: unknown,
     previous?: unknown,
-    unidentified = eventId === undefined || eventId === null
+    unidentified = eventId === undefined || eventId === null,
+    contentIndex?: unknown
   ) {
     return this.transact(() => {
       if (!this.rememberEvent(eventId, value, kind, text, previous)) return '';
       const existing = this.items.find((entry) => entry.id === value);
       const resolved = typeof value === 'string' ? this.resolved.get(value) : undefined;
+      const target = existing ?? resolved;
+      const index =
+        contentIndex === undefined
+          ? undefined
+          : typeof contentIndex === 'number' &&
+              Number.isSafeInteger(contentIndex) &&
+              contentIndex >= 0
+            ? contentIndex
+            : null;
+      if (
+        (existing?.reference !== undefined || target?.referenceConfirmed) &&
+        index !== undefined &&
+        index !== 0
+      ) {
+        this.reject('a transcription has a conflicting content index.');
+        return '';
+      }
+      if (kind === 'final' && existing?.reference !== undefined && existing.reference !== text) {
+        this.reject('a reference transcript conflicts with the completed transcription.');
+        return '';
+      }
       if (
         (existing?.final && (existing.terminal || kind !== 'final' || existing.text !== text)) ||
         (resolved && (resolved.terminal !== 'final' || kind !== 'final' || resolved.text !== text))
@@ -404,18 +474,32 @@ export class LiveUtterances {
         const currentLength = existing?.text.length ?? 0;
         const nextLength = kind === 'partial' ? currentLength + text.length : text.length;
         const otherLength =
-          this.items.reduce((sum, entry) => sum + entry.text.length, 0) - currentLength;
+          this.items.reduce(
+            (sum, entry) => sum + entry.text.length + (entry.reference?.length ?? 0),
+            0
+          ) -
+          currentLength -
+          (kind === 'final' ? (existing?.reference?.length ?? 0) : 0);
         if (otherLength + nextLength > MAX_PENDING_TEXT) {
           this.reject('the pending text limit was reached.');
           return '';
         }
       }
+      if (target && index !== undefined) {
+        target.contentIndex =
+          target.contentIndex === undefined || target.contentIndex === index ? index : null;
+      }
       const committed = this.registerItem(value, previous, true);
       if (this.halted || typeof value !== 'string') return committed;
       const item = this.items.find((entry) => entry.id === value);
       if (!item || item.final) return committed;
+      if (item.contentIndex === undefined) item.contentIndex = index;
       item.text = kind === 'partial' ? appendRealtimeDelta(item.text, text) : text;
       item.final = kind === 'final';
+      if (item.final && item.reference !== undefined) {
+        item.reference = undefined;
+        item.referenceConfirmed = true;
+      }
       item.identityUncertain =
         kind === 'partial' && (item.identityUncertain || (unidentified && !!text));
       return joinTranscriptText(committed, this.flush());
@@ -427,6 +511,10 @@ export class LiveUtterances {
       if (!this.rememberEvent(eventId, value, 'failed', '', previous)) return '';
       const existing = this.items.find((entry) => entry.id === value);
       const resolved = typeof value === 'string' ? this.resolved.get(value) : undefined;
+      if (existing?.reference !== undefined) {
+        this.reject('a reference transcript could not be confirmed after transcription failed.');
+        return '';
+      }
       if (
         (existing?.final && existing.terminal !== 'failed') ||
         (resolved && resolved.terminal !== 'failed')
@@ -459,6 +547,10 @@ export class LiveUtterances {
 
   get identityUncertain() {
     return this.items.some((item) => item.identityUncertain && !!item.text);
+  }
+
+  get referenceUncertain() {
+    return this.items.some((item) => item.reference !== undefined);
   }
 
   discard() {

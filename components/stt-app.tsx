@@ -266,6 +266,8 @@ export function SttApp() {
   const [partial, setPartial] = useState('');
   const [orderUncertain, setOrderUncertain] = useState(false);
   const [identityUncertain, setIdentityUncertain] = useState(false);
+  const [referencePending, setReferencePending] = useState(false);
+  const [referenceOmitted, setReferenceOmitted] = useState(false);
   const [editedOrderUncertain, setEditedOrderUncertain] = useState(false);
   const [editedIdentityUncertain, setEditedIdentityUncertain] = useState(false);
   const [channelReady, setChannelReady] = useState(false);
@@ -298,7 +300,11 @@ export function SttApp() {
   const displayedTranscriptText = joinTranscriptText(transcriptText, partial);
   const exportDocument = appendDocumentText(transcript, partial, liveModel, liveLanguage);
   const exportUncertain =
-    orderUncertain || editedOrderUncertain || identityUncertain || editedIdentityUncertain;
+    orderUncertain ||
+    editedOrderUncertain ||
+    identityUncertain ||
+    editedIdentityUncertain ||
+    referencePending;
   const canExportTimed = !exportUncertain && hasTimestamps(exportDocument);
   const liveStatus = liveStatusCopy[liveState];
 
@@ -314,6 +320,13 @@ export function SttApp() {
     const sessionLanguage = liveLanguageRef.current;
     const sessionModel = liveModelRef.current;
     setTranscript((current) => appendDocumentText(current, text, sessionModel, sessionLanguage));
+  }, []);
+
+  const finishLiveTracker = useCallback(() => {
+    const tracker = utterancesRef.current;
+    if (tracker.referenceUncertain) setReferenceOmitted(true);
+    setReferencePending(false);
+    return tracker.finish();
   }, []);
 
   const retirePeer = useCallback(() => {
@@ -377,6 +390,8 @@ export function SttApp() {
       setLiveError('');
     }
     const tracker = utterancesRef.current;
+    if (tracker.referenceUncertain) setReferenceOmitted(true);
+    setReferencePending(false);
     tracker.discard();
     setPartial('');
     setOrderUncertain(false);
@@ -495,8 +510,7 @@ export function SttApp() {
             request.signal
           );
           if (!isCurrent()) return;
-          const remaining =
-            utterancesRef.current === fallbackTracker ? fallbackTracker.finish() : '';
+          const remaining = utterancesRef.current === fallbackTracker ? finishLiveTracker() : '';
           if (remaining.includes(unconfirmedLiveItemLabel)) {
             labeledOrderUncertainRef.current = true;
           }
@@ -524,7 +538,7 @@ export function SttApp() {
         } catch (error) {
           if (!isCurrent()) return;
           if (utterancesRef.current === fallbackTracker) {
-            const remaining = fallbackTracker.finish();
+            const remaining = finishLiveTracker();
             if (remaining) applyFinalText(remaining);
             setPartial('');
             setOrderUncertain(false);
@@ -560,7 +574,7 @@ export function SttApp() {
       setLiveError(`${reason} Recording locally in this tab and transcribing after Stop.`);
       setLiveState('fallback-recording');
     },
-    [applyFinalText, stopMedia, transcribeFallbackRecording]
+    [applyFinalText, finishLiveTracker, stopMedia, transcribeFallbackRecording]
   );
 
   const cancelFallbackRecorder = useCallback(() => {
@@ -585,7 +599,7 @@ export function SttApp() {
       fallbackRequestRef.current && (recorderRef.current || pendingFallbackRef.current)
     );
     cancelFallbackRecorder();
-    const remaining = utterancesRef.current.finish();
+    const remaining = finishLiveTracker();
     if (remaining) applyFinalText(remaining);
     stopMedia();
     const session = ++liveSessionRef.current;
@@ -599,6 +613,7 @@ export function SttApp() {
     setTrackerNotice(
       discardedRecording ? 'The previous local recording was discarded on Retry.' : ''
     );
+    setReferencePending(false);
     setPartial('');
     setOrderUncertain(false);
     setIdentityUncertain(false);
@@ -620,7 +635,7 @@ export function SttApp() {
         if (session !== liveSessionRef.current || peerConnectionRef.current !== pc) return;
         if (pc.connectionState === 'connected') setLiveState('live');
         if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-          const remaining = utterancesRef.current.finish();
+          const remaining = finishLiveTracker();
           if (remaining) applyFinalText(remaining);
           setPartial('');
           setOrderUncertain(false);
@@ -642,7 +657,7 @@ export function SttApp() {
       };
       const handleChannelClose = () => {
         if (!ownsChannel()) return;
-        const remaining = utterancesRef.current.finish();
+        const remaining = finishLiveTracker();
         if (remaining) applyFinalText(remaining);
         setPartial('');
         setOrderUncertain(false);
@@ -679,6 +694,20 @@ export function SttApp() {
           if (!type) throw new Error('Malformed realtime event');
           const content = Array.isArray(item?.content) ? item.content : [];
           const isCreated = type === 'conversation.item.created';
+          const onlyPart = content[0];
+          const referencePart =
+            isCreated &&
+            item?.type === 'message' &&
+            item.role === 'user' &&
+            content.length === 1 &&
+            onlyPart &&
+            typeof onlyPart === 'object' &&
+            !Array.isArray(onlyPart) &&
+            (onlyPart as Record<string, unknown>).type === 'input_audio'
+              ? (onlyPart as Record<string, unknown>)
+              : undefined;
+          const referenceTranscript =
+            typeof referencePart?.transcript === 'string' ? referencePart.transcript : undefined;
           const isAudioBufferEvent = [
             'input_audio_buffer.speech_started',
             'input_audio_buffer.speech_stopped',
@@ -709,14 +738,12 @@ export function SttApp() {
             if (!value || typeof value !== 'object') continue;
             for (const [key, child] of Object.entries(value)) {
               const isExpectedTranscript =
-                value === parsed &&
                 key === 'transcript' &&
-                type === 'conversation.item.input_audio_transcription.completed';
+                ((value === parsed &&
+                  type === 'conversation.item.input_audio_transcription.completed') ||
+                  (value === referencePart && typeof child === 'string'));
               if (
                 ['transcript', 'transcript_delta', 'final_transcript'].includes(key) &&
-                child !== undefined &&
-                child !== null &&
-                child !== '' &&
                 !isExpectedTranscript
               ) {
                 hasUnexpectedTranscript = true;
@@ -781,7 +808,13 @@ export function SttApp() {
             } else {
               committed = hasNonAudio
                 ? tracker.skip(item?.id, parsed.previous_item_id)
-                : tracker.register(item?.id, parsed.previous_item_id, isAudio);
+                : referenceTranscript !== undefined
+                  ? tracker.registerReference(
+                      item?.id,
+                      parsed.previous_item_id,
+                      referenceTranscript
+                    )
+                  : tracker.register(item?.id, parsed.previous_item_id, isAudio);
             }
           } else if (isAudioBufferEvent) {
             committed = tracker.register(parsed.item_id, parsed.previous_item_id, true);
@@ -814,7 +847,8 @@ export function SttApp() {
                 update.text,
                 undefined,
                 parsed.previous_item_id,
-                eventIdentity === 'unidentified'
+                eventIdentity === 'unidentified',
+                parsed.content_index
               );
               if (committed) applyFinalText(committed);
             } else if (
@@ -858,6 +892,10 @@ export function SttApp() {
                 );
               }
             }
+          } else if (!tracker.error && type === 'error') {
+            setLiveError(
+              'A realtime error was reported. Check the transcript, or Stop and retry if needed.'
+            );
           }
         } catch {
           tracker.reject('a realtime event was malformed or too large.');
@@ -866,6 +904,7 @@ export function SttApp() {
         setPartial(tracker.preview());
         setOrderUncertain(tracker.orderUncertain);
         setIdentityUncertain(tracker.identityUncertain);
+        setReferencePending(tracker.referenceUncertain);
       };
 
       stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
@@ -917,7 +956,7 @@ export function SttApp() {
           return;
         } catch (fallbackError) {
           cancelFallbackRecorder();
-          const remaining = utterancesRef.current.finish();
+          const remaining = finishLiveTracker();
           if (remaining) applyFinalText(remaining);
           setPartial('');
           setOrderUncertain(false);
@@ -936,7 +975,7 @@ export function SttApp() {
         `${message} Check OpenAI billing/model access and restart the app after updating server-side secrets.`
       );
       setLiveState('error');
-      const remaining = utterancesRef.current.finish();
+      const remaining = finishLiveTracker();
       if (remaining) applyFinalText(remaining);
       setPartial('');
       setOrderUncertain(false);
@@ -947,6 +986,7 @@ export function SttApp() {
     applyFinalText,
     cancelFallbackRecorder,
     cancelUpload,
+    finishLiveTracker,
     language,
     retirePeer,
     startFallbackRecorder,
@@ -1003,7 +1043,7 @@ export function SttApp() {
         fallbackRequestRef.current = null;
         fallbackStopRequestedRef.current = false;
         recorder.onstop = null;
-        const remaining = utterancesRef.current.finish();
+        const remaining = finishLiveTracker();
         if (remaining) applyFinalText(remaining);
         setPartial('');
         setOrderUncertain(false);
@@ -1014,7 +1054,7 @@ export function SttApp() {
       return;
     }
 
-    const remaining = utterancesRef.current.finish();
+    const remaining = finishLiveTracker();
     if (remaining) applyFinalText(remaining);
     resolveEditedOrder(true);
     resolveEditedIdentity(true);
@@ -1023,14 +1063,14 @@ export function SttApp() {
     setOrderUncertain(false);
     setIdentityUncertain(false);
     setLiveState('stopped');
-  }, [applyFinalText, resolveEditedIdentity, resolveEditedOrder, stopMedia]);
+  }, [applyFinalText, finishLiveTracker, resolveEditedIdentity, resolveEditedOrder, stopMedia]);
 
   const discardPendingRecording = () => {
     if (!pendingFallbackRef.current) return;
     pendingFallbackRef.current = null;
     fallbackRequestRef.current?.abort();
     fallbackRequestRef.current = null;
-    const remaining = utterancesRef.current.finish();
+    const remaining = finishLiveTracker();
     if (remaining) applyFinalText(remaining);
     setPartial('');
     setOrderUncertain(false);
@@ -1109,6 +1149,8 @@ export function SttApp() {
       const data = (await response.json()) as { transcript: TranscriptDocument };
       if (!isCurrent()) return;
       discardLiveDraft();
+      setReferencePending(false);
+      setReferenceOmitted(false);
       resolveEditedOrder(false);
       resolveEditedIdentity(false);
       labeledOrderUncertainRef.current = false;
@@ -1132,6 +1174,8 @@ export function SttApp() {
     labeledIdentityUncertainRef.current = false;
     setTranscript(emptyTranscript);
     discardLiveDraft();
+    setReferencePending(false);
+    setReferenceOmitted(false);
     setUploadError('');
     setLiveError('');
   };
@@ -1403,6 +1447,19 @@ export function SttApp() {
           {trackerNotice ? (
             <p className="error" role="alert">
               {trackerNotice}
+            </p>
+          ) : null}
+          {referencePending ? (
+            <p className="error" role="alert">
+              A live audio reference transcript is unconfirmed and is not included. Wait for its
+              completed transcription, or Stop and review or repeat the missing speech.
+              Copy/TXT/JSON are unavailable while waiting.
+            </p>
+          ) : null}
+          {referenceOmitted ? (
+            <p className="error" role="alert">
+              An unconfirmed live audio reference transcript was not included. Review the transcript
+              or repeat the missing speech.
             </p>
           ) : null}
           {orderUncertain ? (

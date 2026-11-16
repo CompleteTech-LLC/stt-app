@@ -13,7 +13,11 @@ const uploadedTranscript: TranscriptDocument = {
 };
 
 let downloads: Blob[];
-let channel: { onmessage: ((message: { data: string }) => void) | null };
+let channel: {
+  onmessage: ((message: { data: string }) => void) | null;
+  readyState: string;
+  send: ReturnType<typeof vi.fn>;
+};
 let stopTrack: ReturnType<typeof vi.fn>;
 let automaticItemId: number;
 let automaticEventId: number;
@@ -99,7 +103,7 @@ function emitEvent(event: Record<string, unknown>) {
 
 beforeEach(() => {
   downloads = [];
-  channel = { onmessage: null };
+  channel = { onmessage: null, readyState: 'open', send: vi.fn() };
   stopTrack = vi.fn();
   automaticItemId = 0;
   const track = { stop: stopTrack };
@@ -949,6 +953,423 @@ describe('identified live items', () => {
     expect(await readDownload('TXT')).toBe('first second\n');
   });
 
+  it('reconciles a matching created reference with late predecessor metadata', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      event_id: 'final-B',
+      item_id: 'B',
+      content_index: 0,
+      transcript: 'second'
+    });
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      event_id: 'final-A',
+      item_id: 'A',
+      content_index: 0,
+      transcript: 'first'
+    });
+    const created = {
+      type: 'conversation.item.created',
+      event_id: 'created-B',
+      previous_item_id: 'A',
+      item: {
+        id: 'B',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: 'second' }]
+      }
+    };
+    emitEvent(created);
+    emitEvent(created);
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('first second');
+    expect(getExportButton('TXT')).toBeDisabled();
+    emitEvent({
+      type: 'conversation.item.created',
+      event_id: 'created-A',
+      previous_item_id: null,
+      item: { id: 'A', type: 'message', role: 'user', content: [{ type: 'input_audio' }] }
+    });
+    expect(screen.queryByText(/Live transcription paused/)).not.toBeInTheDocument();
+    expect(await readDownload('TXT')).toBe('first second\n');
+    expect(JSON.parse(await readDownload('JSON')).text).toBe('first second');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(await readDownload('TXT')).toBe('first second\n');
+  });
+
+  it('waits for a matching final when a reference arrives first', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    emitTranscript('completed', 'first', 'A');
+    const created = {
+      type: 'conversation.item.created',
+      event_id: 'reference-B',
+      previous_item_id: 'A',
+      item: {
+        id: 'B',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: 'second' }]
+      }
+    };
+    emitEvent(created);
+    emitEvent(created);
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('first');
+    expect(screen.getByText(/reference transcript is unconfirmed/)).toBeVisible();
+    expect(getExportButton('TXT')).toBeDisabled();
+    expect(getExportButton('JSON')).toBeDisabled();
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      event_id: 'partial-B',
+      item_id: 'B',
+      content_index: 0,
+      delta: 'sec'
+    });
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      event_id: 'final-B',
+      item_id: 'B',
+      content_index: 0,
+      transcript: 'second'
+    });
+    expect(screen.queryByText(/reference transcript is unconfirmed/)).not.toBeInTheDocument();
+    expect(await readDownload('TXT')).toBe('first second\n');
+    expect(JSON.parse(await readDownload('JSON')).text).toBe('first second');
+  });
+
+  it.each(['reference first', 'final first'] as const)(
+    'fences a conflicting reference with %s and retains accepted speech',
+    async (order) => {
+      render(<SttApp />);
+      await startLive();
+      const created = {
+        type: 'conversation.item.created',
+        event_id: 'reference',
+        previous_item_id: null,
+        item: {
+          id: 'A',
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_audio', transcript: 'unconfirmed reference' }]
+        }
+      };
+      if (order === 'reference first') {
+        emitEvent(created);
+        emitTranscript('delta', 'accepted draft', 'A');
+        emitTranscript('completed', 'conflicting final', 'A');
+      } else {
+        emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+        emitTranscript('completed', 'accepted final', 'A');
+        emitEvent(created);
+      }
+      expect(screen.getByText(/reference transcript conflicts/)).toBeVisible();
+      emitTranscript('completed', 'later speech', 'B');
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      const retained = order === 'reference first' ? 'accepted draft' : 'accepted final';
+      expect(await readDownload('TXT')).toBe(`${retained}\n`);
+      expect(JSON.parse(await readDownload('JSON')).text).toBe(retained);
+      if (order === 'reference first') {
+        expect(screen.getByText(/reference transcript was not included/)).toBeVisible();
+      }
+    }
+  );
+
+  it('reports an omitted unconfirmed reference on Stop without exporting it', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    emitTranscript('completed', 'accepted', 'A');
+    emitEvent({
+      type: 'conversation.item.created',
+      previous_item_id: 'A',
+      item: {
+        id: 'B',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: 'not confirmed' }]
+      }
+    });
+    expect(getExportButton('TXT')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(screen.getByText(/reference transcript was not included/)).toBeVisible();
+    expect(await readDownload('TXT')).toBe('accepted\n');
+    expect(JSON.parse(await readDownload('JSON')).text).toBe('accepted');
+    await startLive();
+    expect(screen.getByText(/reference transcript was not included/)).toBeVisible();
+    emitEvent({
+      type: 'conversation.item.created',
+      previous_item_id: null,
+      item: {
+        id: 'C',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: 'later' }]
+      }
+    });
+    emitTranscript('completed', 'later', 'C');
+    expect(screen.queryByText(/reference transcript is unconfirmed/)).not.toBeInTheDocument();
+    expect(screen.getByText(/reference transcript was not included/)).toBeVisible();
+    expect(await readDownload('TXT')).toBe('accepted later\n');
+  });
+
+  it('requires confirmation for an empty reference without duplicating later speech', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({
+      type: 'conversation.item.created',
+      previous_item_id: null,
+      item: {
+        id: 'A',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: '' }]
+      }
+    });
+    expect(screen.getByText(/reference transcript is unconfirmed/)).toBeVisible();
+    emitTranscript('completed', '', 'A');
+    expect(screen.queryByText(/reference transcript is unconfirmed/)).not.toBeInTheDocument();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
+    emitTranscript('completed', 'next', 'B');
+    expect(await readDownload('TXT')).toBe('next\n');
+  });
+
+  it('fences conflicting references and retains a prior partial on Stop', async () => {
+    render(<SttApp />);
+    await startLive();
+    const created = {
+      type: 'conversation.item.created',
+      previous_item_id: null,
+      item: {
+        id: 'A',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: 'first reference' }]
+      }
+    };
+    emitEvent({ ...created, event_id: 'first-reference' });
+    emitTranscript('delta', 'accepted draft', 'A');
+    emitEvent({
+      ...created,
+      event_id: 'second-reference',
+      item: { ...created.item, content: [{ type: 'input_audio', transcript: 'second reference' }] }
+    });
+    expect(screen.getByText(/conflicting reference transcripts/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(screen.getByText(/reference transcript was not included/)).toBeVisible();
+    expect(await readDownload('TXT')).toBe('accepted draft\n');
+  });
+
+  it('does not treat a failed transcription as confirmation of its reference', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({
+      type: 'conversation.item.created',
+      previous_item_id: null,
+      item: {
+        id: 'A',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: 'unconfirmed reference' }]
+      }
+    });
+    emitTranscript('delta', 'accepted draft', 'A');
+    emitEvent({ type: 'conversation.item.input_audio_transcription.failed', item_id: 'A' });
+    expect(screen.getByText(/could not be confirmed after transcription failed/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(screen.getByText(/reference transcript was not included/)).toBeVisible();
+    expect(await readDownload('TXT')).toBe('accepted draft\n');
+  });
+
+  it('retains the verified reference index after a matching item is committed', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({
+      type: 'conversation.item.created',
+      previous_item_id: null,
+      item: {
+        id: 'A',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: 'accepted' }]
+      }
+    });
+    emitTranscript('completed', 'accepted', 'A');
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'A',
+      content_index: 1,
+      transcript: 'accepted'
+    });
+    expect(screen.getByText(/conflicting content index/)).toBeVisible();
+    expect(await readDownload('TXT')).toBe('accepted\n');
+  });
+
+  it.each(['reference first', 'final first'] as const)(
+    'rejects a reference for a different content index with %s',
+    async (order) => {
+      render(<SttApp />);
+      await startLive();
+      const created = {
+        type: 'conversation.item.created',
+        previous_item_id: null,
+        item: {
+          id: 'A',
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_audio', transcript: 'same' }]
+        }
+      };
+      const final = {
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'A',
+        previous_item_id: null,
+        content_index: 1,
+        transcript: 'same'
+      };
+      emitEvent(order === 'reference first' ? created : final);
+      emitEvent(order === 'reference first' ? final : created);
+      expect(screen.getByText(/conflicting content index/)).toBeVisible();
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(
+        order === 'reference first' ? '' : 'same'
+      );
+    }
+  );
+
+  it('bounds unidentified reference text and ignores a stale channel', async () => {
+    render(<SttApp />);
+    await startLive();
+    const oldHandler = channel.onmessage;
+    emitEvent({
+      type: 'conversation.item.created',
+      previous_item_id: null,
+      item: {
+        id: 'A',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: 'x'.repeat(1_000_001) }]
+      }
+    });
+    expect(screen.getByText(/pending text limit/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await startLive();
+    act(() =>
+      oldHandler?.({
+        data: JSON.stringify({
+          type: 'conversation.item.created',
+          previous_item_id: null,
+          item: {
+            id: 'stale',
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_audio', transcript: 'stale' }]
+          }
+        })
+      })
+    );
+    expect(screen.queryByText(/reference transcript is unconfirmed/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('');
+  });
+
+  it.each(['identified', 'unidentified'] as const)(
+    'reports %s server errors without inventing a turn failure',
+    async (identity) => {
+      render(<SttApp />);
+      await startLive();
+      const generalError = {
+        type: 'error',
+        ...(identity === 'identified' ? { event_id: 'general-error' } : {}),
+        error: { message: 'private-message', type: 'private-type', code: 'private-code' }
+      };
+      emitEvent(generalError);
+      expect(screen.getByText(/A realtime error was reported/)).toBeVisible();
+      expect(screen.queryByText(/audio turn was not accepted/)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Finish turn' })).toBeEnabled();
+      expect(document.body).not.toHaveTextContent(/private-message|private-type|private-code/);
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      expect(stopTrack).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('preserves turn correlation and deduplicates errors after acknowledgement', async () => {
+    render(<SttApp />);
+    await startLive();
+    fireEvent.click(screen.getByRole('button', { name: 'Finish turn' }));
+    const firstCommit = JSON.parse(String(channel.send.mock.calls[0][0]));
+    expect(firstCommit.type).toBe('input_audio_buffer.commit');
+    const unrelated = {
+      type: 'error',
+      event_id: 'unrelated-server-error',
+      error: { event_id: 'another-client-event', message: 'private-unrelated' }
+    };
+    emitEvent(unrelated);
+    expect(screen.getByText(/pending turn outcome is unknown/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Finish turn' })).toBeDisabled();
+    emitEvent({
+      type: 'input_audio_buffer.committed',
+      event_id: 'server-ack',
+      item_id: 'A',
+      previous_item_id: null
+    });
+    expect(screen.getByRole('button', { name: 'Finish turn' })).toBeEnabled();
+    expect(screen.queryByText(/pending turn outcome is unknown/)).not.toBeInTheDocument();
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      event_id: 'accepted-transcription',
+      item_id: 'A',
+      content_index: 0,
+      transcript: 'accepted speech'
+    });
+    emitEvent(unrelated);
+    expect(screen.queryByText(/A realtime error was reported/)).not.toBeInTheDocument();
+    emitEvent({
+      type: 'error',
+      event_id: 'after-ack-error',
+      error: { message: 'private-after-ack', code: 'private-code', type: 'private-type' }
+    });
+    expect(screen.getByText(/A realtime error was reported/)).toBeVisible();
+    expect(screen.queryByText(/audio turn was not accepted/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Finish turn' }));
+    const secondCommit = JSON.parse(String(channel.send.mock.calls[1][0]));
+    expect(secondCommit.event_id).not.toBe(firstCommit.event_id);
+    emitEvent({
+      type: 'error',
+      event_id: 'correlated-server-error',
+      error: { event_id: secondCommit.event_id, message: 'private-correlated' }
+    });
+    expect(screen.getByText(/audio turn was not accepted/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Finish turn' })).toBeEnabled();
+    expect(document.body).not.toHaveTextContent(
+      /private-unrelated|private-after-ack|private-code|private-type|private-correlated/
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(stopTrack).toHaveBeenCalledTimes(1);
+    expect(await readDownload('TXT')).toBe('accepted speech\n');
+  });
+
+  it('ignores a stale channel error after Stop and restart', async () => {
+    render(<SttApp />);
+    await startLive();
+    const oldHandler = channel.onmessage;
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(stopTrack).toHaveBeenCalledTimes(1);
+    await startLive();
+    act(() =>
+      oldHandler?.({
+        data: JSON.stringify({
+          type: 'error',
+          event_id: 'stale-error',
+          error: { message: 'private-stale' }
+        })
+      })
+    );
+    expect(screen.queryByText(/A realtime error was reported/)).not.toBeInTheDocument();
+    expect(screen.getByText('Listening')).toBeVisible();
+    expect(document.body).not.toHaveTextContent('private-stale');
+  });
+
   it('keeps known direct predecessors adjacent when other drafts overlap', async () => {
     render(<SttApp />);
     await startLive();
@@ -1289,7 +1710,30 @@ describe('identified live items', () => {
     { type: 'input_audio_buffer.committed', item_id: 'A', transcript: 'unexpected text' },
     {
       type: 'conversation.item.created',
-      item: { id: 'A', content: [{ type: 'input_audio', transcript: 'unexpected text' }] }
+      item: {
+        id: 'A',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'input_audio', transcript: 'unexpected text' }]
+      }
+    },
+    {
+      type: 'conversation.item.created',
+      item: {
+        id: 'A',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: 'unexpected text' }, { type: 'input_audio' }]
+      }
+    },
+    {
+      type: 'conversation.item.created',
+      item: {
+        id: 'A',
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_audio', transcript: null }]
+      }
     },
     {
       type: 'conversation.item.created',

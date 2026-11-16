@@ -26,7 +26,8 @@ const formatTimestamp = (seconds: number, separator: ',' | '.') => {
   return `${pad(hours)}:${pad(minutes)}:${pad(wholeSeconds)}${separator}${pad(milliseconds, 3)}`;
 };
 
-export const exportTxt = (document: TranscriptDocument) => document.text.trimEnd() + '\n';
+export const exportTxt = (document: TranscriptDocument) =>
+  document.text + (document.text.endsWith('\n') ? '' : '\n');
 
 export const exportJson = (document: TranscriptDocument) =>
   JSON.stringify(

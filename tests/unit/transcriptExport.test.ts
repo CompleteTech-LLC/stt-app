@@ -21,6 +21,17 @@ describe('transcript exports', () => {
     expect(exportTxt(document)).toBe('Hello world.\n');
   });
 
+  it.each([
+    ['line\n\n', 'line\n\n'],
+    ['line  ', 'line  \n'],
+    ['line\r\n', 'line\r\n'],
+    ['\n\n', '\n\n'],
+    ['', '\n']
+  ])('preserves whitespace in TXT export for %j', (text, expected) => {
+    expect(exportTxt({ ...document, text })).toBe(expected);
+    expect(JSON.parse(exportJson({ ...document, text })).text).toBe(text);
+  });
+
   it('exports JSON with metadata', () => {
     expect(JSON.parse(exportJson(document))).toMatchObject({
       text: 'Hello world.',

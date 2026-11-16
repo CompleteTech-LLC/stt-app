@@ -366,6 +366,31 @@ afterEach(() => {
 });
 
 describe('owned realtime channel closure', () => {
+  it('retains unidentified partials with both warnings on channel closure', async () => {
+    render(<SttApp />);
+    const { fixture, peer } = await startSession('Start');
+    emit(peer, {
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'unconfirmed',
+      delta: '  ha\n'
+    });
+    emit(peer, {
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'unconfirmed',
+      delta: '  ha\n'
+    });
+    expect(screen.getByRole('button', { name: 'TXT' })).toBeDisabled();
+    closeChannelOnly(peer);
+    expect(fixture.track.stop).toHaveBeenCalled();
+    const retained =
+      '[Live item; order unconfirmed]\n[Live item; event identity unconfirmed]\n  ha\n  ha\n';
+    expect(screen.getByLabelText('Transcript text')).toHaveValue(retained);
+    fireEvent.click(screen.getByRole('button', { name: 'TXT' }));
+    expect(await blobText(downloads.at(-1)!)).toBe(retained);
+    fireEvent.click(screen.getByRole('button', { name: 'JSON' }));
+    expect(JSON.parse(await blobText(downloads.at(-1)!)).text).toBe(retained);
+  });
+
   it.each([false, true])(
     'reports and recovers a channel-only interruption with pending turn = %s',
     async (pendingTurn) => {

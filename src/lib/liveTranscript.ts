@@ -6,6 +6,8 @@ export const joinTranscriptText = (finalText: string, liveDraft: string) => {
 export const appendRealtimeDelta = (currentDraft: string, delta: string) =>
   `${currentDraft}${delta}`;
 
+export const unconfirmedLiveIdentityLabel = '[Live item; event identity unconfirmed]';
+
 const MAX_TRACKED_ITEMS = 1024;
 const MAX_TRACKED_EVENTS = 4096;
 const MAX_ID_LENGTH = 256;
@@ -18,6 +20,7 @@ type LiveItem = {
   text: string;
   final: boolean;
   audio: boolean;
+  identityUncertain: boolean;
   previous?: string;
   previousKnown: boolean;
   terminal?: 'non-audio' | 'failed';
@@ -46,6 +49,7 @@ export class LiveUtterances {
   private resolved = new Map<string, ResolvedItem>();
   private successors = new Map<string, string>();
   private events = new Map<string, TrackedEvent>();
+  private acknowledgedItems = new Set<string>();
   private eventTextLength = 0;
   private resolvedTextLength = 0;
   private lastResolvedId: string | undefined;
@@ -142,6 +146,17 @@ export class LiveUtterances {
     return 'accepted';
   }
 
+  acknowledge(value: unknown) {
+    if (!this.active || this.halted || !this.validId(value)) return false;
+    if (this.acknowledgedItems.has(value)) return false;
+    if (this.acknowledgedItems.size >= MAX_TRACKED_ITEMS) {
+      this.reject('the session acknowledgement limit was reached.');
+      return false;
+    }
+    this.acknowledgedItems.add(value);
+    return true;
+  }
+
   private rememberEvent(
     eventId: unknown,
     value: unknown,
@@ -214,7 +229,11 @@ export class LiveUtterances {
       });
       this.lastResolvedId = item.id;
       this.resolvedTextLength += item.text.length;
-      committed = joinTranscriptText(committed, item.text);
+      const text =
+        item.identityUncertain && item.text
+          ? `${unconfirmedLiveIdentityLabel}\n${item.text}`
+          : item.text;
+      committed = joinTranscriptText(committed, text);
     }
     return committed;
   }
@@ -335,6 +354,7 @@ export class LiveUtterances {
         text: '',
         final: false,
         audio,
+        identityUncertain: false,
         previous: previousId,
         previousKnown: previous !== undefined
       });
@@ -366,7 +386,8 @@ export class LiveUtterances {
     kind: 'partial' | 'final',
     text: string,
     eventId?: unknown,
-    previous?: unknown
+    previous?: unknown,
+    unidentified = eventId === undefined || eventId === null
   ) {
     return this.transact(() => {
       if (!this.rememberEvent(eventId, value, kind, text, previous)) return '';
@@ -395,6 +416,8 @@ export class LiveUtterances {
       if (!item || item.final) return committed;
       item.text = kind === 'partial' ? appendRealtimeDelta(item.text, text) : text;
       item.final = kind === 'final';
+      item.identityUncertain =
+        kind === 'partial' && (item.identityUncertain || (unidentified && !!text));
       return joinTranscriptText(committed, this.flush());
     });
   }
@@ -434,22 +457,34 @@ export class LiveUtterances {
     return false;
   }
 
+  get identityUncertain() {
+    return this.items.some((item) => item.identityUncertain && !!item.text);
+  }
+
   discard() {
     this.items = [];
     this.events.clear();
+    this.acknowledgedItems.clear();
     this.eventTextLength = 0;
     this.reject('the workspace changed while this session was active.');
   }
 
   finish() {
-    const text = this.orderUncertain
-      ? this.items
-          .filter((item) => item.text)
-          .map((item) => `[Live item; order unconfirmed]\n${item.text}`)
-          .join('\n\n')
-      : this.preview();
+    const orderUncertain = this.orderUncertain;
+    const text = this.items.reduce((result, item) => {
+      if (!item.text) return result;
+      const labels = [
+        orderUncertain ? '[Live item; order unconfirmed]' : '',
+        item.identityUncertain ? unconfirmedLiveIdentityLabel : ''
+      ].filter(Boolean);
+      const retained = labels.length ? `${labels.join('\n')}\n${item.text}` : item.text;
+      return orderUncertain && result
+        ? `${result}\n\n${retained}`
+        : joinTranscriptText(result, retained);
+    }, '');
     this.items = [];
     this.events.clear();
+    this.acknowledgedItems.clear();
     this.eventTextLength = 0;
     this.active = false;
     return text;

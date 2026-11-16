@@ -16,6 +16,7 @@ let downloads: Blob[];
 let channel: { onmessage: ((message: { data: string }) => void) | null };
 let stopTrack: ReturnType<typeof vi.fn>;
 let automaticItemId: number;
+let automaticEventId: number;
 
 const getExportButton = (name: string) => screen.getByRole('button', { name });
 
@@ -31,9 +32,9 @@ async function readDownload(name: string) {
   });
 }
 
-async function uploadTranscript() {
+async function uploadTranscript(document: TranscriptDocument = uploadedTranscript) {
   vi.mocked(fetch).mockResolvedValueOnce(
-    new Response(JSON.stringify({ transcript: uploadedTranscript }), {
+    new Response(JSON.stringify({ transcript: document }), {
       headers: { 'Content-Type': 'application/json' }
     })
   );
@@ -43,14 +44,15 @@ async function uploadTranscript() {
   });
   fireEvent.click(screen.getByRole('button', { name: 'Transcribe file' }));
   await screen.findByText('done');
-  await waitFor(() =>
-    expect(screen.getByLabelText('Transcript text')).toHaveValue(uploadedTranscript.text)
-  );
+  await waitFor(() => expect(screen.getByLabelText('Transcript text')).toHaveValue(document.text));
 }
 
-async function startLive() {
+async function startLive(model: string | null = 'gpt-realtime-whisper') {
   automaticItemId = 0;
-  vi.mocked(fetch).mockResolvedValueOnce(new Response('synthetic answer'));
+  automaticEventId = 0;
+  const headers = new Headers();
+  if (model !== null) headers.set('X-STT-Model', model);
+  vi.mocked(fetch).mockResolvedValueOnce(new Response('synthetic answer', { headers }));
   fireEvent.click(screen.getByRole('tab', { name: 'Live Mic' }));
   fireEvent.click(screen.getByRole('button', { name: 'Start' }));
   await screen.findByText('Listening');
@@ -82,6 +84,7 @@ function emitTranscript(type: 'delta' | 'completed', text: string, itemId?: stri
     channel.onmessage?.({
       data: JSON.stringify({
         type: `conversation.item.input_audio_transcription.${type}`,
+        event_id: `automatic-event-${++automaticEventId}`,
         item_id: id,
         ...(itemId === undefined ? { previous_item_id: previous } : {}),
         ...(type === 'delta' ? { delta: text } : { transcript: text })
@@ -270,6 +273,92 @@ describe('transcript export controls', () => {
     expect(mixed.language).toBeUndefined();
   });
 
+  it.each([
+    ['auto', 'auto', undefined],
+    ['en', 'auto', undefined],
+    ['auto', 'en', undefined],
+    ['en', 'en', 'en'],
+    ['en', 'es', undefined]
+  ] as const)(
+    'combines upload language %s and live language %s honestly',
+    async (uploadedLanguage, sessionLanguage, expected) => {
+      render(<SttApp />);
+      const uploaded = { ...uploadedTranscript, language: uploadedLanguage };
+      await uploadTranscript(uploaded);
+      fireEvent.change(screen.getByLabelText('Language hint'), {
+        target: { value: sessionLanguage }
+      });
+      await startLive();
+      expect(JSON.parse(await readDownload('JSON'))).toEqual(uploaded);
+      emitTranscript('completed', 'Live speech');
+      const json = JSON.parse(await readDownload('JSON'));
+      expect(json.text).toBe('Original transcript. Live speech');
+      expect(json.language).toBe(expected);
+    }
+  );
+
+  it.each([
+    ['default', 'gpt-realtime-whisper', 'gpt-realtime-whisper'],
+    ['override', 'synthetic-override-v2', 'synthetic-override-v2'],
+    ['missing', null, undefined],
+    ['invalid whitespace', 'invalid model', undefined],
+    ['overlong', 'x'.repeat(257), undefined]
+  ] as const)(
+    'uses %s realtime metadata without inventing a model',
+    async (_label, model, expected) => {
+      render(<SttApp />);
+      await startLive(model);
+      emitTranscript('delta', ' draft');
+      expect(JSON.parse(await readDownload('JSON')).model).toBe(expected);
+      emitTranscript('completed', ' final');
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      const json = JSON.parse(await readDownload('JSON'));
+      expect(json.model).toBe(expected);
+      expect(json.text).toBe(' final');
+    }
+  );
+
+  it.each([
+    ['synthetic-override-v2', 'synthetic-override-v2', 'synthetic-override-v2'],
+    ['gpt-4o-mini-transcribe', 'synthetic-override-v2', 'mixed'],
+    ['gpt-4o-mini-transcribe', null, undefined]
+  ] as const)(
+    'combines known or missing model metadata without fabricating provenance',
+    async (uploadedModel, realtimeModel, expected) => {
+      render(<SttApp />);
+      const uploaded = { ...uploadedTranscript, model: uploadedModel };
+      await uploadTranscript(uploaded);
+      await startLive(realtimeModel);
+      expect(JSON.parse(await readDownload('JSON'))).toEqual(uploaded);
+      emitTranscript('completed', 'Live speech');
+      expect(JSON.parse(await readDownload('JSON')).model).toBe(expected);
+    }
+  );
+
+  it('keeps realtime provenance session-local across stale callbacks', async () => {
+    render(<SttApp />);
+    await startLive('synthetic-first');
+    const oldHandler = channel.onmessage;
+    emitTranscript('completed', 'First');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await startLive('synthetic-second');
+    act(() =>
+      oldHandler?.({
+        data: JSON.stringify({
+          type: 'conversation.item.input_audio_transcription.completed',
+          event_id: 'old-final',
+          item_id: 'old',
+          previous_item_id: null,
+          transcript: 'stale'
+        })
+      })
+    );
+    emitTranscript('completed', 'Second');
+    const json = JSON.parse(await readDownload('JSON'));
+    expect(json.text).toBe('First Second');
+    expect(json.model).toBe('mixed');
+  });
+
   it('preserves edited indentation through draft, final, Stop, TXT, and JSON', async () => {
     render(<SttApp />);
     fireEvent.change(screen.getByLabelText('Transcript text'), {
@@ -318,6 +407,75 @@ describe('transcript export controls', () => {
     });
     expect(getExportButton('SRT')).toBeDisabled();
     expect(getExportButton('VTT')).toBeDisabled();
+  });
+
+  it.each([
+    ['auto', 'auto', undefined],
+    ['en', 'auto', undefined],
+    ['auto', 'en', undefined],
+    ['en', 'en', 'en']
+  ] as const)(
+    'combines upload language %s and fallback language %s honestly',
+    async (uploadedLanguage, fallbackLanguage, expected) => {
+      stubMediaRecorder();
+      render(<SttApp />);
+      await uploadTranscript({ ...uploadedTranscript, language: uploadedLanguage });
+      fireEvent.change(screen.getByLabelText('Language hint'), {
+        target: { value: fallbackLanguage }
+      });
+      vi.mocked(fetch)
+        .mockRejectedValueOnce(new TypeError('offline'))
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              transcript: {
+                text: 'Fallback speech',
+                model: 'synthetic-file-model',
+                language: fallbackLanguage,
+                segments: []
+              }
+            })
+          )
+        );
+      fireEvent.click(screen.getByRole('tab', { name: 'Live Mic' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+      await screen.findByText('Recording locally');
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      await waitFor(() =>
+        expect(screen.getByLabelText('Transcript text')).toHaveValue(
+          'Original transcript. Fallback speech'
+        )
+      );
+      const json = JSON.parse(await readDownload('JSON'));
+      expect(json.language).toBe(expected);
+      expect(json.model).toBe('mixed');
+    }
+  );
+
+  it('uses fallback file provenance when no realtime speech exists', async () => {
+    stubMediaRecorder();
+    render(<SttApp />);
+    vi.mocked(fetch)
+      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            transcript: {
+              text: 'Fallback speech',
+              model: 'synthetic-file-model',
+              language: 'en',
+              segments: []
+            }
+          })
+        )
+      );
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+    await screen.findByText('Recording locally');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await waitFor(() =>
+      expect(screen.getByLabelText('Transcript text')).toHaveValue('Fallback speech')
+    );
+    expect(JSON.parse(await readDownload('JSON')).model).toBe('synthetic-file-model');
   });
 
   it('replaces a pending live draft when a file transcription arrives', async () => {
@@ -386,6 +544,7 @@ describe('transcript export controls', () => {
       channel.onmessage?.({
         data: JSON.stringify({
           type: 'conversation.item.input_audio_transcription.delta',
+          event_id: 'queued-draft',
           item_id: 'queued-item',
           previous_item_id: null,
           delta: 'Last draft'
@@ -702,7 +861,7 @@ describe('identified live items', () => {
     { description: 'empty', content: [] },
     { description: 'absent', content: undefined },
     { description: 'unknown', content: [{ type: 'unknown' }] },
-    { description: 'mixed text and unknown', content: [{ type: 'input_text' }, {}] }
+    { description: 'audio only', content: [{ type: 'input_audio' }] }
   ])('keeps known audio when created content is $description', async ({ content }) => {
     render(<SttApp />);
     await startLive();
@@ -713,6 +872,39 @@ describe('identified live items', () => {
     emitTranscript('completed', 'spoken final', 'A');
     expect(await readDownload('TXT')).toBe('spoken final\n');
   });
+
+  it.each(['non-audio first', 'pending audio first', 'resolved audio first'] as const)(
+    'fences mixed known non-audio and unknown content with %s',
+    async (order) => {
+      render(<SttApp />);
+      await startLive();
+      const nonAudio = {
+        type: 'conversation.item.created',
+        event_id: 'mixed-created',
+        previous_item_id: null,
+        item: { id: 'A', content: [{ type: 'input_text', text: 'typed' }, {}] }
+      };
+      if (order !== 'non-audio first') {
+        emitEvent({
+          type: 'input_audio_buffer.committed',
+          event_id: 'audio-registration',
+          item_id: 'A',
+          previous_item_id: null
+        });
+        emitTranscript(order === 'pending audio first' ? 'delta' : 'completed', 'spoken', 'A');
+      }
+      emitEvent(nonAudio);
+      if (order === 'non-audio first') emitTranscript('completed', 'not accepted', 'A');
+      expect(screen.getByText(/Live transcription paused:/)).toHaveTextContent(/non-audio|audio/);
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(
+        order === 'non-audio first' ? '' : 'spoken'
+      );
+      emitTranscript('completed', 'not accepted', 'A');
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(
+        order === 'non-audio first' ? '' : 'spoken'
+      );
+    }
+  );
 
   it('fences non-audio identity after audio, including after completion', async () => {
     render(<SttApp />);

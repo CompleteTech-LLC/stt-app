@@ -466,6 +466,168 @@ describe('server event identity and turn control', () => {
     await expectExports('first second');
   });
 
+  it.each(['pending prior item', 'resolved prior item'] as const)(
+    'does not settle a later turn with a new ACK event for the %s',
+    async (state) => {
+      render(<SttApp />);
+      const channel = await startLive();
+      finishTurn(channel);
+      emit(channel, {
+        type: 'input_audio_buffer.speech_started',
+        event_id: 'earlier-registration',
+        item_id: 'A',
+        previous_item_id: null
+      });
+      emit(channel, {
+        type: 'input_audio_buffer.committed',
+        event_id: 'first-ack',
+        item_id: 'A',
+        previous_item_id: null
+      });
+      expect(finishButton()).toBeEnabled();
+      if (state === 'resolved prior item') {
+        emit(channel, {
+          type: 'conversation.item.input_audio_transcription.completed',
+          event_id: 'final-A',
+          item_id: 'A',
+          transcript: 'first'
+        });
+      }
+      finishTurn(channel);
+      emit(channel, {
+        type: 'input_audio_buffer.committed',
+        event_id: 'second-ack-for-A',
+        item_id: 'A',
+        previous_item_id: null
+      });
+      expectPending(channel, 2);
+      expect(screen.getByText(/outcome is unknown/)).toHaveTextContent(/Stop and retry/);
+      emit(channel, {
+        type: 'input_audio_buffer.committed',
+        event_id: 'first-ack-for-B',
+        item_id: 'B',
+        previous_item_id: 'A'
+      });
+      expect(finishButton()).toBeEnabled();
+      expect(screen.queryByText(/outcome is unknown/)).not.toBeInTheDocument();
+    }
+  );
+
+  it('accepts the first identified ACK after a transcription already resolved the item', async () => {
+    render(<SttApp />);
+    const channel = await startLive();
+    finishTurn(channel);
+    emit(channel, {
+      type: 'conversation.item.input_audio_transcription.completed',
+      event_id: 'early-final',
+      item_id: 'A',
+      previous_item_id: null,
+      transcript: 'first'
+    });
+    expectPending(channel, 1);
+    emit(channel, {
+      type: 'input_audio_buffer.committed',
+      event_id: 'first-ack-for-A',
+      item_id: 'A',
+      previous_item_id: null
+    });
+    expect(finishButton()).toBeEnabled();
+    await expectExports('first');
+  });
+
+  it.each(['ignored first', 'acknowledgement first'] as const)(
+    'fences ignored-kind event ID collisions with %s',
+    async (order) => {
+      render(<SttApp />);
+      const channel = await startLive();
+      const ignored = { type: 'rate_limits.updated', event_id: 'shared', rate_limits: [] };
+      const ack = {
+        type: 'input_audio_buffer.committed',
+        event_id: 'shared',
+        item_id: 'A',
+        previous_item_id: null
+      };
+      emit(channel, { type: 'rate_limits.updated', event_id: 'unrelated', rate_limits: [] });
+      finishTurn(channel);
+      if (order === 'ignored first') {
+        emit(channel, ignored);
+        emit(channel, ack);
+        expectPending(channel, 1);
+      } else {
+        emit(channel, ack);
+        expect(finishButton()).toBeEnabled();
+        finishTurn(channel);
+        emit(channel, ignored);
+        expectPending(channel, 2);
+      }
+      expectFence();
+      emit(channel, {
+        type: 'input_audio_buffer.committed',
+        event_id: 'new-ack',
+        item_id: 'B',
+        previous_item_id: 'A'
+      });
+      expect(finishButton()).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+    }
+  );
+
+  it.each(['ignored first', 'transcription first'] as const)(
+    'fences ignored-kind and transcription ID collisions with %s',
+    async (order) => {
+      render(<SttApp />);
+      const channel = await startLive();
+      const ignored = { type: 'rate_limits.updated', event_id: 'shared', rate_limits: [] };
+      const final = {
+        type: 'conversation.item.input_audio_transcription.completed',
+        event_id: 'shared',
+        item_id: 'A',
+        previous_item_id: null,
+        transcript: 'first'
+      };
+      emit(channel, order === 'ignored first' ? ignored : final);
+      emit(channel, order === 'ignored first' ? final : ignored);
+      expectFence();
+      expect(transcript()).toBe(order === 'ignored first' ? '' : 'first');
+      emit(channel, {
+        type: 'conversation.item.input_audio_transcription.completed',
+        event_id: 'later',
+        item_id: 'B',
+        previous_item_id: 'A',
+        transcript: 'not accepted'
+      });
+      expect(transcript()).toBe(order === 'ignored first' ? '' : 'first');
+    }
+  );
+
+  it('tracks and deduplicates ignored event kinds within the shared event limit', async () => {
+    render(<SttApp />);
+    const channel = await startLive();
+    const ordinary = { type: 'rate_limits.updated', event_id: 'ignored-0', rate_limits: [] };
+    emit(channel, ordinary);
+    emit(channel, ordinary);
+    act(() => {
+      for (let index = 1; index < 4096; index += 1) {
+        channel.emit({
+          type: 'rate_limits.updated',
+          event_id: `ignored-${index}`,
+          rate_limits: []
+        });
+      }
+    });
+    expect(screen.queryByText(/Live transcription paused:/)).not.toBeInTheDocument();
+    finishTurn(channel);
+    emit(channel, {
+      type: 'input_audio_buffer.committed',
+      event_id: 'overflow-ack',
+      item_id: 'A',
+      previous_item_id: null
+    });
+    expectPending(channel, 1);
+    expectFence();
+    expect(screen.getByText(/Live transcription paused:/)).toHaveTextContent(/event.*limit/);
+  }, 15000);
+
   it.each(['missing correlation', 'unrelated correlation', 'old correlation', 'outer ID only'])(
     'does not release a pending turn for %s or expose provider error text',
     async (kind) => {
@@ -512,6 +674,9 @@ describe('server event identity and turn control', () => {
         }
       });
       expectPending(channel, 2);
+      expect(screen.getByText(/pending turn outcome is unknown/)).toHaveTextContent(
+        /Stop and retry/
+      );
       expect(transcript()).toBe('accepted');
       expect(document.body.textContent).not.toContain(privateText);
       expect(document.body.textContent).not.toContain('private_provider_code');
@@ -544,6 +709,48 @@ describe('server event identity and turn control', () => {
         });
         await expectExports('accepted next');
       }
+    }
+  );
+
+  it.each(['missing', 'unrelated', 'old'] as const)(
+    'offers safe recovery for an uncorrelated %s error without a later ACK',
+    async (kind) => {
+      const logs = [
+        vi.spyOn(console, 'log'),
+        vi.spyOn(console, 'warn'),
+        vi.spyOn(console, 'error')
+      ];
+      render(<SttApp />);
+      const channel = await startLive();
+      const oldCommit = finishTurn(channel);
+      emit(channel, {
+        type: 'input_audio_buffer.committed',
+        event_id: 'ack-A',
+        item_id: 'A',
+        previous_item_id: null
+      });
+      finishTurn(channel);
+      const nestedId = kind === 'old' ? oldCommit.event_id : 'unrelated-client-event';
+      emit(channel, {
+        type: 'error',
+        event_id: 'error-server-id',
+        error: {
+          ...(kind === 'missing' ? {} : { event_id: nestedId }),
+          message: 'PRIVATE_ERROR_MESSAGE',
+          type: 'PRIVATE_ERROR_TYPE',
+          code: 'PRIVATE_ERROR_CODE'
+        }
+      });
+      expectPending(channel, 2);
+      expect(screen.getByText(/pending turn outcome is unknown/)).toHaveTextContent(
+        /Stop and retry/
+      );
+      expect(document.body.textContent).not.toMatch(/PRIVATE_ERROR/);
+      logs.forEach((log) => expect(JSON.stringify(log.mock.calls)).not.toMatch(/PRIVATE_ERROR/));
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      const replacement = await startLive();
+      finishTurn(replacement);
+      expect(replacement).not.toBe(channel);
     }
   );
 
@@ -666,6 +873,10 @@ describe('server event identity and turn control', () => {
     emit(channel, delta);
     emit(channel, delta);
     expect(transcript()).toBe('haha');
+    expect(screen.getByText(/Live event identity is unconfirmed/)).toBeVisible();
+    for (const name of ['Copy transcript', 'TXT', 'JSON']) {
+      expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
     emit(channel, {
       type: 'conversation.item.input_audio_transcription.completed',
       item_id: 'A',
@@ -673,6 +884,126 @@ describe('server event identity and turn control', () => {
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     await expectExports('corrected');
+  });
+
+  it.each(['equal speech', 'repeated delivery'] as const)(
+    'retains ambiguous no-ID partials as labeled text on Stop: %s',
+    async () => {
+      render(<SttApp />);
+      const channel = await startLive();
+      emit(channel, {
+        type: 'input_audio_buffer.committed',
+        event_id: 'registration',
+        item_id: 'A',
+        previous_item_id: null
+      });
+      const delta = {
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'A',
+        delta: ' ha\n'
+      };
+      emit(channel, delta);
+      emit(channel, delta);
+      expect(transcript()).toBe(' ha\n ha\n');
+      expect(screen.getByRole('button', { name: 'TXT' })).toBeDisabled();
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      await expectExports('[Live item; event identity unconfirmed]\n ha\n ha\n');
+    }
+  );
+
+  it('keeps order and event identity uncertainty independent through edits and Stop', async () => {
+    render(<SttApp />);
+    const channel = await startLive();
+    emit(channel, {
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'A',
+      delta: '  unconfirmed\n'
+    });
+    expect(screen.getByText(/Live item order is unconfirmed/)).toBeVisible();
+    expect(screen.getByText(/Live event identity is unconfirmed/)).toBeVisible();
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: '  edited\n' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm edited order' }));
+    expect(screen.getByRole('button', { name: 'TXT' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await expectExports('[Edited live text; event identity unconfirmed]\n  edited\n');
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: '  edited\n' }
+    });
+    expect(screen.getByRole('button', { name: 'JSON' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm edited text' }));
+    await expectExports('  edited\n');
+  });
+
+  it('retains both labels on Stop and preserves uncertainty after transcription failure', async () => {
+    render(<SttApp />);
+    const channel = await startLive();
+    emit(channel, {
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'A',
+      delta: 'draft'
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await expectExports(
+      '[Live item; order unconfirmed]\n[Live item; event identity unconfirmed]\ndraft'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    const replacement = await startLive();
+    emit(replacement, {
+      type: 'input_audio_buffer.committed',
+      event_id: 'registration',
+      item_id: 'A',
+      previous_item_id: null
+    });
+    emit(replacement, {
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'A',
+      delta: 'partial'
+    });
+    emit(replacement, {
+      type: 'conversation.item.input_audio_transcription.failed',
+      event_id: 'failure',
+      item_id: 'A'
+    });
+    await expectExports('[Live item; event identity unconfirmed]\npartial');
+  });
+
+  it('keeps order and identity warnings independently without duplicating them on edit', async () => {
+    render(<SttApp />);
+    const channel = await startLive();
+    emit(channel, {
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'A',
+      delta: 'draft'
+    });
+    fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: ' edited\n' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm edited text' }));
+    expect(screen.getByRole('button', { name: 'TXT' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep text with order warning' }));
+    await expectExports('[Edited live text; order unconfirmed]\n edited\n');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    const replacement = await startLive();
+    emit(replacement, {
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'B',
+      delta: 'draft'
+    });
+    fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: ' text' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Keep text with order warning' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Keep text with identity warning' }));
+    const retained =
+      '[Edited live text; event identity unconfirmed]\n[Edited live text; order unconfirmed]\n text';
+    await expectExports(retained);
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: `${retained}!` }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Keep text with order warning' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Keep text with identity warning' }));
+    await expectExports(`${retained}!`);
   });
 
   it('counts registration IDs toward the bounded 4,096-event session limit', async () => {

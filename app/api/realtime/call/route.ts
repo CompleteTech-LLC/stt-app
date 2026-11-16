@@ -47,7 +47,8 @@ export async function POST(request: NextRequest) {
     return new NextResponse(answer.sdp, {
       status: 200,
       headers: {
-        'Content-Type': 'application/sdp'
+        'Content-Type': 'application/sdp',
+        'X-STT-Model': answer.model
       }
     });
   } catch (error) {

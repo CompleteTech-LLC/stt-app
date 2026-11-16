@@ -377,7 +377,7 @@ describe('live capture resource ownership', () => {
         })
       );
       expect(finish).toBeDisabled();
-      expect(screen.getByText(/acknowledgement had no event ID/)).toBeVisible();
+      expect(screen.getByText(/acknowledgement cannot be verified/)).toBeVisible();
       act(() =>
         channel.emit({
           type: 'input_audio_buffer.committed',
@@ -386,8 +386,18 @@ describe('live capture resource ownership', () => {
           previous_item_id: null
         })
       );
+      expect(finish).toBeDisabled();
+      expect(screen.getByText(/acknowledgement cannot be verified/)).toBeVisible();
+      act(() =>
+        channel.emit({
+          type: 'input_audio_buffer.committed',
+          event_id: 'identified-new-item',
+          item_id: 'B',
+          previous_item_id: 'A'
+        })
+      );
       expect(finish).toBeEnabled();
-      expect(screen.queryByText(/acknowledgement had no event ID/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/acknowledgement cannot be verified/)).not.toBeInTheDocument();
     }
   );
 
@@ -968,6 +978,7 @@ describe('live capture resource ownership', () => {
     act(() =>
       peers[0].channel.emit({
         type: 'conversation.item.input_audio_transcription.delta',
+        event_id: 'pending-before-fallback',
         item_id: 'first',
         previous_item_id: null,
         delta: 'Pending'
@@ -984,6 +995,35 @@ describe('live capture resource ownership', () => {
     );
   });
 
+  it('retains an unidentified partial warning before fallback file text', async () => {
+    const response = { ok: false, status: 503, json: async () => ({}) } as Response;
+    const setup = deferred(response);
+    realtimeResponses.push(() => setup.promise);
+    transcriptionResponses.push(() => Promise.resolve(transcriptResponse('Fallback speech')));
+    getUserMedia.mockResolvedValueOnce(makeStream().stream);
+    render(<SttApp />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+    await waitFor(() => expect(peers).toHaveLength(1));
+    act(() =>
+      peers[0].channel.emit({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'first',
+        previous_item_id: null,
+        delta: '  Pending\n'
+      })
+    );
+    expect(screen.getByRole('button', { name: 'TXT' })).toBeDisabled();
+    await resolveDeferred(setup, response);
+    await screen.findByText('Recording locally');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await emitRecorderStop(recorders[0]);
+    await waitFor(() =>
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(
+        '[Live item; event identity unconfirmed]\n  Pending\nFallback speech'
+      )
+    );
+  });
+
   it('keeps the prior workspace and live draft when an interrupted recording is discarded', async () => {
     const response = { ok: false, status: 503, json: async () => ({}) } as Response;
     const setup = deferred(response);
@@ -996,6 +1036,7 @@ describe('live capture resource ownership', () => {
     act(() =>
       peers[0].channel.emit({
         type: 'conversation.item.input_audio_transcription.delta',
+        event_id: 'pending-before-discard',
         item_id: 'first',
         previous_item_id: null,
         delta: 'Pending'
@@ -1111,6 +1152,7 @@ describe('live capture resource ownership', () => {
         });
         oldPeer.channel.emit({
           type: 'conversation.item.input_audio_transcription.delta',
+          event_id: 'unfinished-before-interruption',
           item_id: 'first',
           delta: 'Unfinished speech'
         });

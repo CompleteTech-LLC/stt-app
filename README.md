@@ -16,13 +16,17 @@ Status: early prototype (version 0.1.0, not published as a package). It needs yo
 ### Transcript exports
 
 TXT and JSON export the text currently shown in the workspace, including live drafts and edits,
-when its order is established. SRT and VTT require valid original timestamps for every segment.
+when its order and event identity are established. SRT and VTT require valid original timestamps
+for every segment.
 Editing the text or adding live speech invalidates that alignment, so subtitle exports are disabled
 and JSON exports an empty `segments` list. The configured file models use JSON transcription and
 do not promise timestamp segments; synthetic timestamp fixtures are not evidence of provider
 availability. Realtime events do not supply segment timestamps. Starting live capture alone does
-not relabel an existing upload. Combined text uses `model: "mixed"` when its sources differ, and
-omits the language when the sources do not share a known language.
+not relabel an existing upload. Realtime provenance uses the same-origin `X-STT-Model` response
+header when it contains a bounded valid model identifier; otherwise its model is unknown. Combined
+text uses `model: "mixed"` when known sources differ, omits model when either is unknown, and omits
+language unless both sources share the same known, non-auto language. Fallback uses the file
+transcription response's provenance, not a presumed realtime model.
 
 Live transcription uses the documented transcription `item_id` to associate deltas, final
 transcripts and failures. An `event_id` identifies an event, not an utterance. Predecessor IDs
@@ -39,17 +43,26 @@ replace the workspace with an upload to discard the uncertain edit; erasing the 
 not resolve it. The label leaves the edited text and its whitespace intact.
 Editing text that already contains an uncertainty label also requires an explicit choice again,
 so removing the label in an ordinary edit cannot silently turn unconfirmed order into fact.
+Unidentified partial events have a separate event-identity uncertainty: repeated text could be
+distinct speech or a repeated delivery. Their preview is retained without text-based deduplication,
+but Copy/TXT/JSON are disabled until a valid final replaces that item's draft. Stop, channel close,
+failure, or fallback retains available unidentified partial text with an event-identity warning;
+the order warning is independent and both appear when applicable. Editing uncertain or warned text
+requires a separate explicit choice to retain the identity warning or confirm the displayed text;
+confirming order alone does not confirm event identity. Clear or a successful replacement discards it.
 Contradictory or duplicate first-item metadata, conflicting terminal events, and conflicting
 audio/non-audio identities fence the session. A failed predecessor is terminal: available partial
 text is retained, successors can continue, and the workspace shows a warning.
 
 Realtime turn detection is disabled for the configured model. Press **Finish turn** after speaking
 to send an explicit `input_audio_buffer.commit`; listening continues. Each commit has a distinct
-client event ID. A new, identified server acknowledgement releases the pending turn; an error does
-so only when its nested client event ID matches that turn. The server acknowledgement does not echo
+client event ID. A new, identified server acknowledgement for an item not already acknowledged in
+this session releases the pending turn; an error does so only when its nested client event ID
+matches that turn. The server acknowledgement does not echo
 the client ID, so this assumes the one outstanding commit receives its acknowledgement before the
-next commit. An acknowledgement without a server event ID cannot safely release a turn: Stop and
-retry, or wait for an identified acknowledgement. Wait for transcription and ordering metadata
+next commit. An acknowledgement without a server event ID cannot safely release a turn, and a later
+acknowledgement for the same item cannot establish a new turn: Stop and retry, or wait for an
+identified acknowledgement for a new item. Wait for transcription and ordering metadata
 before pressing Stop. Stop releases capture immediately and does not wait for a commit or final
 response; any available unresolved text is retained with the labels described above. If the active
 data channel closes, capture stops and Retry is available; uncommitted audio and pending results may
@@ -82,15 +95,18 @@ For one session, the tracker retains at most 1,024 item IDs (including reference
 text, and serialized event payloads retained for deduplication. Each item or event ID is limited to
 256 code units. A data-channel message over 1,100,000 code units is also refused before JSON parsing.
 Reaching a limit fences the session instead of evicting IDs that could still be needed to reject
-late events. Registration, transcription delta/completion/failure, and error events share the same
-server event-ID space. Exact repeated payloads with the same nonempty `event_id` are suppressed
-before ordering or turn state changes; conflicting or malformed IDs fence the session. Payloads are
+late events. All observed server event kinds share the same event-ID space. Exact repeated payloads
+with the same nonempty `event_id` are suppressed before ordering or turn state changes; conflicting
+or malformed IDs fence the session. Payloads are
 retained only in bounded browser-session memory, not displayed or logged, and released when the
 tracker finishes or the workspace changes. Omitted event IDs are treated as unidentified; a present null ID is malformed:
 registration metadata can still establish order, but an unidentified acknowledgement cannot
 release a pending turn. Without an event ID, a repeated delta is indistinguishable from legitimate
-repeated text and is appended; a final transcript replaces the item's accumulated draft. These
-rules have synthetic test coverage, not live provider qualification.
+repeated text and is appended with the uncertainty treatment above; a final transcript replaces the
+item's accumulated draft. Acknowledged item IDs are tracked separately within the item limit. An
+uncorrelated error leaves the turn pending and reports an unknown outcome with Stop/retry guidance;
+it is not proof of commit failure. These rules have synthetic test coverage, not live provider
+qualification.
 
 ## Architecture
 

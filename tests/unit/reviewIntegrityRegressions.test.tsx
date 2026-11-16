@@ -114,6 +114,7 @@ function partial(peer: IntegrityPeer, itemId: string, text: string, previous: st
   emit(peer, {
     type: 'conversation.item.input_audio_transcription.delta',
     item_id: itemId,
+    event_id: `partial-${itemId}`,
     previous_item_id: previous,
     delta: text
   });
@@ -440,6 +441,55 @@ describe('timestamp and provenance integrity', () => {
     expect(json.model).not.toBe('gpt-4o-mini-transcribe');
     expect(json.model).not.toBe('gpt-realtime-whisper');
   });
+
+  it.each([
+    ['synthetic-selected', 'synthetic-selected'],
+    ['synthetic-file', 'mixed'],
+    [undefined, undefined]
+  ] as const)(
+    'carries session model through fallback with file model %s',
+    async (fileModel, expected) => {
+      let rejectAnswer!: (reason: Error) => void;
+      const pendingAnswer = new Promise<string>((_resolve, reject) => {
+        rejectAnswer = reject;
+      });
+      const answerText = vi.fn(() => pendingAnswer);
+      realtimeResponses.push(() =>
+        Promise.resolve({
+          ok: true,
+          headers: new Headers({ 'X-STT-Model': 'synthetic-selected' }),
+          text: answerText
+        } as Response)
+      );
+      render(<SttApp />);
+      fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+      await waitFor(() => expect(answerText).toHaveBeenCalledOnce());
+      partial(peers[0], 'pending', 'Retained speech', null);
+      fileResponses.push(() =>
+        Promise.resolve(
+          response({
+            text: 'Fallback speech',
+            language: 'en',
+            model: fileModel,
+            segments: []
+          })
+        )
+      );
+      await act(async () => {
+        rejectAnswer(new Error('synthetic SDP interruption'));
+        await pendingAnswer.catch(() => undefined);
+      });
+      await screen.findByText('Recording locally');
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      await act(async () => {
+        recorders[0].emitStop();
+        await Promise.resolve();
+      });
+      await screen.findByText('Stopped');
+      const json = await expectTextExports('Retained speech Fallback speech');
+      expect(json.model).toBe(expected);
+    }
+  );
 
   it('uses the language captured at each live session start for drafts and final text', async () => {
     render(<SttApp />);

@@ -4,6 +4,7 @@ import { toFile } from 'openai';
 
 import { getServerConfig } from '@/src/lib/config';
 import type { FileSttModel } from '@/src/lib/constants';
+import { AppError } from '@/src/lib/errors';
 import { alignedTranscriptSegments, type TranscriptDocument } from '@/src/lib/transcriptExport';
 import { createOpenAIClient } from '@/src/server/openaiClient';
 
@@ -47,11 +48,18 @@ export const transcribeFile = async (
     input.signal ? { signal: input.signal } : undefined
   );
   input.signal?.throwIfAborted();
-  const response: TranscriptionResponse =
+  const response: TranscriptionResponse | undefined =
     result && typeof result === 'object' && !Array.isArray(result)
       ? (result as TranscriptionResponse)
-      : {};
-  const text = typeof response.text === 'string' ? response.text : '';
+      : undefined;
+  if (typeof response?.text !== 'string') {
+    throw new AppError(
+      'UPSTREAM_ERROR',
+      'OpenAI transcription service returned an invalid response.',
+      502
+    );
+  }
+  const text = response.text;
 
   return {
     text,

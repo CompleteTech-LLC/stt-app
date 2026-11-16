@@ -77,7 +77,34 @@ describe('ordered live utterances', () => {
     items.update('A', 'partial', 'ha');
     items.update('A', 'partial', 'ha');
     expect(items.preview()).toBe('hahahaha');
+    expect(items.identityUncertain).toBe(true);
     expect(items.update('A', 'final', 'corrected')).toBe('corrected');
+    expect(items.identityUncertain).toBe(false);
+  });
+
+  it('tracks ACK items independently from registrations, without eviction', () => {
+    const items = new LiveUtterances();
+    items.register('item-0', null);
+    expect(items.acknowledge('item-0')).toBe(true);
+    expect(items.acknowledge('item-0')).toBe(false);
+    for (let index = 1; index < 1024; index++) {
+      expect(items.acknowledge(`item-${index}`)).toBe(true);
+    }
+    expect(items.acknowledge('one-too-many')).toBe(false);
+    expect(items.error).toMatch(/acknowledgement limit/);
+  });
+
+  it('retains identity uncertainty per item independently of chronology and other finals', () => {
+    const items = new LiveUtterances();
+    items.update('B', 'partial', 'ha');
+    items.update('B', 'partial', 'ha');
+    items.update('A', 'final', 'first', 'final-A');
+    items.register('B', 'A');
+    items.register('A', null);
+    expect(items.orderUncertain).toBe(false);
+    expect(items.identityUncertain).toBe(true);
+    expect(items.preview()).toBe('haha');
+    expect(items.finish()).toBe('[Live item; event identity unconfirmed]\nhaha');
   });
 
   it.each(['missing', 'different-item', 'different-text', 'failed'] as const)(
@@ -240,7 +267,7 @@ describe('ordered live utterances', () => {
     pending.update('B', 'final', 'second', 'event-1');
     pending.update('B', 'final', 'different', 'event-2');
     expect(pending.error).toMatch(/terminal item.*conflicting/);
-    expect(pending.finish()).toBe('first second');
+    expect(pending.finish()).toBe('[Live item; event identity unconfirmed]\nfirst second');
 
     const resolved = new LiveUtterances();
     resolved.register('A', null);
@@ -316,7 +343,7 @@ describe('ordered live utterances', () => {
     items.update('A', 'partial', 'first');
     items.update('B', 'partial', 'second');
     expect(items.update('A', 'final', 'first final')).toBe('first final');
-    expect(items.finish()).toBe('second');
+    expect(items.finish()).toBe('[Live item; event identity unconfirmed]\nsecond');
   });
 
   it('discards registered items even before their first delta, including empty finals', () => {
@@ -348,7 +375,7 @@ describe('ordered live utterances', () => {
     expect(items.error).toMatch(/item ID/);
     expect(items.preview()).toBe('old');
     expect(items.update('A', 'final', 'old final')).toBe('');
-    expect(items.finish()).toBe('old');
+    expect(items.finish()).toBe('[Live item; event identity unconfirmed]\nold');
   });
 
   it('fences known and subsequently described unregistered predecessors on discard', () => {
@@ -401,7 +428,9 @@ describe('ordered live utterances', () => {
     items.update('A', 'partial', 'incomplete');
     items.register('B', 'A');
     expect(items.update('B', 'final', 'second')).toBe('');
-    expect(items.fail('A', undefined, 'failure')).toBe('incomplete second');
+    expect(items.fail('A', undefined, 'failure')).toBe(
+      '[Live item; event identity unconfirmed]\nincomplete second'
+    );
     expect(items.fail('A', undefined, 'failure')).toBe('');
     expect(items.update('C', 'final', 'third', undefined, 'B')).toBe('third');
   });
@@ -449,7 +478,7 @@ describe('ordered live utterances', () => {
     payload.update('A', 'partial', 'draft', undefined, null);
     expect(payload.trackEvent('large', 'x'.repeat(1_000_001))).toBe('rejected');
     expect(payload.error).toMatch(/event text limit/);
-    expect(payload.finish()).toBe('draft');
+    expect(payload.finish()).toBe('[Live item; event identity unconfirmed]\ndraft');
   });
 
   it('stops on a pending-text limit without erasing the existing draft', () => {
@@ -459,7 +488,7 @@ describe('ordered live utterances', () => {
     items.update('A', 'partial', draft);
     items.update('A', 'partial', 'overflow');
     expect(items.error).toMatch(/pending text limit/);
-    expect(items.finish()).toBe(draft);
+    expect(items.finish()).toBe(`[Live item; event identity unconfirmed]\n${draft}`);
   });
 
   it('preflights the pending-text limit before applying predecessor metadata', () => {
@@ -471,7 +500,9 @@ describe('ordered live utterances', () => {
     items.update('A', 'partial', 'x'.repeat(1_000_000), undefined, 'B');
     expect(items.error).toMatch(/pending text limit/);
     expect(items.preview()).toBe('first second');
-    expect(items.finish()).toBe('first second');
+    expect(items.finish()).toBe(
+      '[Live item; event identity unconfirmed]\nfirst [Live item; event identity unconfirmed]\nsecond'
+    );
   });
 
   it('bounds retained event text without erasing pending text', () => {
@@ -493,7 +524,7 @@ describe('ordered live utterances', () => {
     items.update('B', 'partial', 'second');
     expect(items.update('B', 'final', 'changed final')).toBe('');
     expect(items.error).toMatch(/resolved text limit/);
-    expect(items.finish()).toBe('second');
+    expect(items.finish()).toBe('[Live item; event identity unconfirmed]\nsecond');
   });
 
   it('rejects cyclic or conflicting predecessor metadata while preserving drafts', () => {
@@ -502,7 +533,9 @@ describe('ordered live utterances', () => {
     cycle.update('B', 'partial', 'saved');
     cycle.register('A', 'B');
     expect(cycle.error).toMatch(/cycle/);
-    expect(cycle.finish()).toBe('[Live item; order unconfirmed]\nsaved');
+    expect(cycle.finish()).toBe(
+      '[Live item; order unconfirmed]\n[Live item; event identity unconfirmed]\nsaved'
+    );
 
     const conflict = new LiveUtterances();
     conflict.register('B', 'A');

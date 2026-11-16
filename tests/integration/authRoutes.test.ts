@@ -90,6 +90,28 @@ describe('paid route authentication', () => {
       })
     );
   });
+
+  it('forwards authenticated request cancellation to realtime processing', async () => {
+    vi.stubEnv('BASIC_AUTH_USER', 'operator');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'test-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
+    vi.mocked(createRealtimeCallAnswer).mockResolvedValue({ sdp: 'v=0\r\n', model: 'test-model' });
+    const controller = new AbortController();
+    const request = new NextRequest('http://localhost/api/realtime/call', {
+      method: 'POST',
+      headers: {
+        authorization: `Basic ${Buffer.from('operator:test-password').toString('base64')}`
+      },
+      body: 'v=0\r\n',
+      signal: controller.signal
+    });
+
+    expect((await realtimeCall(request)).status).toBe(200);
+    const input = vi.mocked(createRealtimeCallAnswer).mock.calls[0][0];
+    expect(input.signal).toBe(request.signal);
+    controller.abort();
+    expect(input.signal?.aborted).toBe(true);
+  });
 });
 
 describe('authentication at paid route boundaries', () => {

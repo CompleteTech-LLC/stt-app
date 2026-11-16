@@ -7,6 +7,7 @@ type RealtimeInput = {
   language: string;
   delay: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   safetyIdentifier?: string;
+  signal?: AbortSignal;
 };
 
 const parseOpenAIError = (body: string): { message?: string; code?: string } => {
@@ -54,6 +55,10 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
   );
 
   try {
+    const signal = input.signal
+      ? AbortSignal.any([controller.signal, input.signal])
+      : controller.signal;
+    signal.throwIfAborted();
     const response = await fetch('https://api.openai.com/v1/realtime/calls', {
       method: 'POST',
       headers: {
@@ -61,7 +66,7 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
         ...(input.safetyIdentifier ? { 'OpenAI-Safety-Identifier': input.safetyIdentifier } : {})
       },
       body: form,
-      signal: controller.signal
+      signal
     });
 
     const body = await response.text();

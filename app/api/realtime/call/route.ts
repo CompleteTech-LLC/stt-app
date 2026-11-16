@@ -32,7 +32,8 @@ export async function POST(request: NextRequest) {
     const answer = await createRealtimeCallAnswer({
       ...payload,
       sdp,
-      safetyIdentifier: getSafetyIdentifier(request)
+      safetyIdentifier: getSafetyIdentifier(request),
+      signal: request.signal
     });
 
     logger.info('realtime_call_created', {

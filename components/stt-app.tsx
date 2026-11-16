@@ -311,24 +311,33 @@ export function SttApp() {
         if (session !== liveSessionRef.current) return;
         try {
           const parsed = JSON.parse(message.data as string) as Record<string, unknown>;
-          const item = parsed.item && typeof parsed.item === 'object'
-            ? (parsed.item as Record<string, unknown>) : undefined;
+          const item =
+            parsed.item && typeof parsed.item === 'object'
+              ? (parsed.item as Record<string, unknown>)
+              : undefined;
           const id = parsed.item_id ?? item?.id;
           const type = typeof parsed.type === 'string' ? parsed.type : '';
           let committed = '';
           if (typeof id === 'string' && id.trim()) {
             if (type === 'conversation.item.created' && item) {
               const content = Array.isArray(item.content) ? item.content : [];
-              const isAudio = content.some((part: unknown) =>
-                part && typeof part === 'object' && (part as Record<string, unknown>).type === 'input_audio');
+              const isAudio = content.some(
+                (part: unknown) =>
+                  part &&
+                  typeof part === 'object' &&
+                  (part as Record<string, unknown>).type === 'input_audio'
+              );
               // Only classify an item when its content is present; incomplete events remain unknown.
               if (Array.isArray(item.content)) {
                 committed = isAudio
                   ? utterancesRef.current.register(id, parsed.previous_item_id)
                   : utterancesRef.current.skip(id, parsed.previous_item_id);
               }
-            } else if (type === 'input_audio_buffer.speech_started' ||
-              type === 'input_audio_buffer.speech_stopped' || type === 'input_audio_buffer.committed') {
+            } else if (
+              type === 'input_audio_buffer.speech_started' ||
+              type === 'input_audio_buffer.speech_stopped' ||
+              type === 'input_audio_buffer.committed'
+            ) {
               committed = utterancesRef.current.register(id, parsed.previous_item_id);
             }
           }

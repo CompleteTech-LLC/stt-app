@@ -30,8 +30,10 @@ export class LiveUtterances {
 
   private flush() {
     let committed = '';
-    while (this.items[0]?.final &&
-      (!this.items[0].previous || this.resolved.has(this.items[0].previous))) {
+    while (
+      this.items[0]?.final &&
+      (!this.items[0].previous || this.resolved.has(this.items[0].previous))
+    ) {
       const item = this.items.shift()!;
       this.resolve(item.id);
       committed = joinTranscriptText(committed, item.text);
@@ -44,7 +46,7 @@ export class LiveUtterances {
     const visiting = new Set<string>();
     const visited = new Set<string>();
     const ordered: typeof this.items = [];
-    const visit = (item: typeof this.items[number]) => {
+    const visit = (item: (typeof this.items)[number]) => {
       if (visited.has(item.id) || visiting.has(item.id)) return;
       visiting.add(item.id);
       const predecessor = item.previous && byId.get(item.previous);
@@ -66,7 +68,8 @@ export class LiveUtterances {
       this.order();
       return this.flush();
     }
-    const previousId = typeof previous === 'string' && previous.trim() ? this.id(previous) : undefined;
+    const previousId =
+      typeof previous === 'string' && previous.trim() ? this.id(previous) : undefined;
     const item = { id, text: '', final: false, previous: previousId };
     this.items.push(item);
     this.order();
@@ -90,7 +93,8 @@ export class LiveUtterances {
     if (typeof eventId === 'string' && eventId.trim()) {
       if (this.events.has(eventId)) return '';
       this.events.add(eventId);
-      if (this.events.size > MAX_RESOLVED_ITEMS) this.events.delete(this.events.values().next().value!);
+      if (this.events.size > MAX_RESOLVED_ITEMS)
+        this.events.delete(this.events.values().next().value!);
     }
     if (this.resolved.has(id) || (id === 'anonymous' && this.anonymousDiscarded)) {
       if (kind === 'final' && id === 'anonymous') this.anonymousDiscarded = false;

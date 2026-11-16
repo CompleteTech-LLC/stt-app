@@ -294,7 +294,9 @@ describe('transcript export controls', () => {
 describe('cancelled microphone startup', () => {
   it('stops a stream acquired after Stop without opening a connection', async () => {
     let resolveStream!: (stream: MediaStream) => void;
-    const pending = new Promise<MediaStream>((resolve) => { resolveStream = resolve; });
+    const pending = new Promise<MediaStream>((resolve) => {
+      resolveStream = resolve;
+    });
     vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValueOnce(pending);
     const connection = vi.fn();
     vi.stubGlobal('RTCPeerConnection', connection);
@@ -311,18 +313,28 @@ describe('cancelled microphone startup', () => {
   });
 });
 
-
 describe('identified live items', () => {
   it('does not block audio on a created non-audio predecessor', async () => {
     render(<SttApp />);
     await startLive();
-    act(() => channel.onmessage?.({ data: JSON.stringify({
-      type: 'conversation.item.created', previous_item_id: null,
-      item: { id: 'A', content: [{ type: 'input_text', text: 'hello' }] }
-    }) }));
-    act(() => channel.onmessage?.({ data: JSON.stringify({
-      type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A'
-    }) }));
+    act(() =>
+      channel.onmessage?.({
+        data: JSON.stringify({
+          type: 'conversation.item.created',
+          previous_item_id: null,
+          item: { id: 'A', content: [{ type: 'input_text', text: 'hello' }] }
+        })
+      })
+    );
+    act(() =>
+      channel.onmessage?.({
+        data: JSON.stringify({
+          type: 'input_audio_buffer.committed',
+          item_id: 'B',
+          previous_item_id: 'A'
+        })
+      })
+    );
     emitTranscript('completed', 'speech', 'B');
     expect(screen.getByLabelText('Transcript text')).toHaveValue('speech');
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
@@ -339,7 +351,8 @@ describe('identified live items', () => {
       emitTranscript('completed', 'second final', 'B');
       expect(screen.getByLabelText('Transcript text')).toHaveValue('first draft second final');
       if (action === 'clear') fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
-      if (action === 'edit') fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: 'Edited' } });
+      if (action === 'edit')
+        fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: 'Edited' } });
       if (action === 'replace') await uploadTranscript();
       emitTranscript('completed', 'first final', 'A');
       emitTranscript('completed', 'second final', 'B');
@@ -347,9 +360,14 @@ describe('identified live items', () => {
       expect(screen.getByLabelText('Transcript text')).toHaveValue(
         action === 'clear' ? 'new' : action === 'edit' ? 'Edited new' : 'Original transcript. new'
       );
+      if (action === 'replace') fireEvent.click(screen.getByRole('tab', { name: 'Live Mic' }));
       fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
       expect(await readDownload('TXT')).toBe(
-        (action === 'clear' ? 'new' : action === 'edit' ? 'Edited new' : 'Original transcript. new') + '\n'
+        (action === 'clear'
+          ? 'new'
+          : action === 'edit'
+            ? 'Edited new'
+            : 'Original transcript. new') + '\n'
       );
     }
   );
@@ -371,11 +389,17 @@ describe('identified live items', () => {
     async (action) => {
       render(<SttApp />);
       await startLive();
-      act(() => channel.onmessage?.({ data: JSON.stringify({
-        type: 'input_audio_buffer.speech_started', item_id: 'A'
-      }) }));
+      act(() =>
+        channel.onmessage?.({
+          data: JSON.stringify({
+            type: 'input_audio_buffer.speech_started',
+            item_id: 'A'
+          })
+        })
+      );
       if (action === 'clear') fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
-      if (action === 'edit') fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: 'Edited' } });
+      if (action === 'edit')
+        fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: 'Edited' } });
       if (action === 'replace') await uploadTranscript();
       emitTranscript('completed', 'new', 'B');
       emitTranscript('completed', 'old', 'A');
@@ -389,18 +413,23 @@ describe('identified live items', () => {
 describe('cancelled connection startup', () => {
   it('releases the connection on Stop while the answer is pending and ignores its resolution', async () => {
     let resolveAnswer!: (answer: Response) => void;
-    const answer = new Promise<Response>((resolve) => { resolveAnswer = resolve; });
+    const answer = new Promise<Response>((resolve) => {
+      resolveAnswer = resolve;
+    });
     vi.mocked(fetch).mockReturnValueOnce(answer);
     const close = vi.fn();
     const setRemoteDescription = vi.fn();
-    vi.stubGlobal('RTCPeerConnection', class {
-      createDataChannel = () => channel;
-      addTrack = vi.fn();
-      createOffer = async () => ({ type: 'offer', sdp: 'offer' });
-      setLocalDescription = vi.fn();
-      setRemoteDescription = setRemoteDescription;
-      close = close;
-    });
+    vi.stubGlobal(
+      'RTCPeerConnection',
+      class {
+        createDataChannel = () => channel;
+        addTrack = vi.fn();
+        createOffer = async () => ({ type: 'offer', sdp: 'offer' });
+        setLocalDescription = vi.fn();
+        setRemoteDescription = setRemoteDescription;
+        close = close;
+      }
+    );
     render(<SttApp />);
     fireEvent.click(screen.getByRole('button', { name: 'Start' }));
     await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
@@ -417,16 +446,21 @@ describe('cancelled connection startup', () => {
 
   it('does not connect after an outstanding offer resolves', async () => {
     let resolveOffer!: (offer: RTCSessionDescriptionInit) => void;
-    const offer = new Promise<RTCSessionDescriptionInit>((resolve) => { resolveOffer = resolve; });
+    const offer = new Promise<RTCSessionDescriptionInit>((resolve) => {
+      resolveOffer = resolve;
+    });
     const close = vi.fn();
     const setLocalDescription = vi.fn();
-    vi.stubGlobal('RTCPeerConnection', class {
-      createDataChannel = () => channel;
-      addTrack = vi.fn();
-      createOffer = () => offer;
-      setLocalDescription = setLocalDescription;
-      close = close;
-    });
+    vi.stubGlobal(
+      'RTCPeerConnection',
+      class {
+        createDataChannel = () => channel;
+        addTrack = vi.fn();
+        createOffer = () => offer;
+        setLocalDescription = setLocalDescription;
+        close = close;
+      }
+    );
     render(<SttApp />);
     fireEvent.click(screen.getByRole('button', { name: 'Start' }));
     await waitFor(() => expect(screen.getByText('Connecting')).toBeInTheDocument());

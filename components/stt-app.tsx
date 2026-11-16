@@ -13,7 +13,7 @@ import {
   RotateCcw,
   Upload
 } from 'lucide-react';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   acceptedExtensions,
@@ -186,6 +186,7 @@ export function SttApp() {
   const fallbackChunksRef = useRef<Blob[]>([]);
   const utterancesRef = useRef(new LiveUtterances());
   const liveSessionRef = useRef(0);
+  const realtimeRequestRef = useRef<AbortController | null>(null);
 
   const discardLiveDraft = useCallback(() => {
     utterancesRef.current.discard();
@@ -225,11 +226,27 @@ export function SttApp() {
 
   const stopMedia = useCallback(() => {
     liveSessionRef.current += 1;
+    realtimeRequestRef.current?.abort();
+    realtimeRequestRef.current = null;
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
   }, []);
+
+  useEffect(() => {
+    return () => {
+      const recorder = recorderRef.current;
+      recorderRef.current = null;
+      if (recorder) {
+        // Unmount releases capture without uploading an abandoned recording.
+        recorder.ondataavailable = null;
+        recorder.onstop = null;
+        if (recorder.state !== 'inactive') recorder.stop();
+      }
+      stopMedia();
+    };
+  }, [stopMedia]);
 
   const transcribeFallbackRecording = useCallback(
     async (blob: Blob) => {
@@ -359,6 +376,8 @@ export function SttApp() {
       await pc.setLocalDescription(offer);
       if (session !== liveSessionRef.current) return;
 
+      const request = new AbortController();
+      realtimeRequestRef.current = request;
       const answer = await fetch(
         `/api/realtime/call?language=${encodeURIComponent(language)}&delay=low`,
         {
@@ -366,7 +385,8 @@ export function SttApp() {
           headers: {
             'Content-Type': 'application/sdp'
           },
-          body: offer.sdp || ''
+          body: offer.sdp || '',
+          signal: request.signal
         }
       );
 

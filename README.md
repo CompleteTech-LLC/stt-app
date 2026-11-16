@@ -53,6 +53,10 @@ confirming order alone does not confirm event identity. Clear or a successful re
 Contradictory or duplicate first-item metadata, conflicting terminal events, and conflicting
 audio/non-audio identities fence the session. A failed predecessor is terminal: available partial
 text is retained, successors can continue, and the workspace shows a warning.
+Recognized non-input-audio item kinds, non-input-audio content types, and system or assistant roles
+are identity claims even when other metadata is unknown. They conflict with an input-audio claim
+for the same item ID in either arrival order; missing or unrecognized metadata alone remains neutral.
+Recognizing these claims does not enable tools or qualify live-provider behavior.
 
 Realtime turn detection is disabled for the configured model. Press **Finish turn** after speaking
 to send an explicit `input_audio_buffer.commit`; listening continues. Each commit has a distinct

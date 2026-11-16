@@ -85,6 +85,21 @@ const acceptedAttribute = [...acceptedMimeTypes, ...acceptedExtensions].join(','
 const unconfirmedLiveItemLabel = '[Live item; order unconfirmed]';
 const unconfirmedEditedTextLabel = '[Edited live text; order unconfirmed]';
 const unconfirmedEditedIdentityLabel = '[Edited live text; event identity unconfirmed]';
+const nonAudioRealtimeItemTypes = new Set([
+  'function_call',
+  'function_call_output',
+  'mcp_approval_request',
+  'mcp_approval_response',
+  'mcp_list_tools',
+  'mcp_call'
+]);
+const nonAudioRealtimeContentTypes = new Set([
+  'input_text',
+  'text',
+  'output_text',
+  'input_image',
+  'output_audio'
+]);
 
 const selectedRealtimeModel = (value: string | null | undefined) =>
   value && value.length <= 256 && /^[\x21-\x7e]+$/.test(value) ? value : undefined;
@@ -750,14 +765,17 @@ export function SttApp() {
                 typeof part === 'object' &&
                 (part as Record<string, unknown>).type === 'input_audio'
             );
-            const hasNonAudio = content.some(
-              (part: unknown) =>
-                part &&
-                typeof part === 'object' &&
-                ['input_text', 'text', 'output_text'].includes(
-                  String((part as Record<string, unknown>).type)
-                )
-            );
+            const hasNonAudioContent = content.some((part: unknown) => {
+              if (!part || typeof part !== 'object') return false;
+              const partType = (part as Record<string, unknown>).type;
+              return typeof partType === 'string' && nonAudioRealtimeContentTypes.has(partType);
+            });
+            const itemType = item?.type;
+            const hasNonAudio =
+              (typeof itemType === 'string' && nonAudioRealtimeItemTypes.has(itemType)) ||
+              item?.role === 'system' ||
+              item?.role === 'assistant' ||
+              hasNonAudioContent;
             if (isAudio && hasNonAudio) {
               tracker.reject('an item contains conflicting audio and non-audio identity.');
             } else {

@@ -10,6 +10,14 @@ type RealtimeInput = {
   signal?: AbortSignal;
 };
 
+const cancelResponseBody = (response: Response) => {
+  try {
+    void response.body?.cancel().catch(() => undefined);
+  } catch {
+    return;
+  }
+};
+
 export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: string }) => {
   const config = getServerConfig();
   const apiKey = requireOpenAIKey(config);
@@ -50,8 +58,7 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
       signal
     });
 
-    signal.throwIfAborted();
-    const body = await response.text();
+    if (!response.ok || signal.aborted) cancelResponseBody(response);
     signal.throwIfAborted();
 
     if (!response.ok) {
@@ -68,6 +75,9 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
         upstreamStatus
       );
     }
+
+    const body = await response.text();
+    signal.throwIfAborted();
 
     if (!body.trim().startsWith('v=')) {
       throw new AppError(

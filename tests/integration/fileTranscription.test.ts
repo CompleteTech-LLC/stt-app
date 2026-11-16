@@ -21,11 +21,56 @@ const input = () => ({
 
 const clientWith = (create: unknown) => ({ audio: { transcriptions: { create } } }) as never;
 
+const transcriptionEndpoint = 'https://api.openai.com/v1/audio/transcriptions';
+
+function syntheticSdkTransport(
+  handleTranscription: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+) {
+  const probe = vi.fn(() => Promise.resolve(new Response()));
+  const transcription = vi.fn(handleTranscription);
+  const unexpected = vi.fn<(url: string, method: string) => Promise<never>>(() =>
+    Promise.reject(new Error('Unexpected synthetic SDK transport request'))
+  );
+  const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (input === 'data:,' && init === undefined) return probe();
+    const url = input instanceof Request ? input.url : String(input);
+    const requestMethod = init?.method ?? (input instanceof Request ? input.method : 'GET');
+    const method = requestMethod.toUpperCase();
+    if (url === transcriptionEndpoint && method === 'POST') return transcription(input, init);
+    return unexpected(url, method);
+  });
+  return { fetch, probe, transcription, unexpected };
+}
+
+function expectSyntheticSdkTransport(transport: ReturnType<typeof syntheticSdkTransport>) {
+  expect(transport.probe).toHaveBeenCalledTimes(1);
+  expect(transport.unexpected).not.toHaveBeenCalled();
+  expect(transport.transcription).toHaveBeenCalledTimes(1);
+  const [input, init] = transport.transcription.mock.calls[0];
+  expect(input instanceof Request ? input.url : String(input)).toBe(transcriptionEndpoint);
+  const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+  expect(method.toUpperCase()).toBe('POST');
+}
+
+async function bounded<Value>(promise: Promise<Value>, label: string): Promise<Value> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 2000);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const abortableTransport = () => {
   let upstreamStarted!: (signal: AbortSignal) => void;
   const started = new Promise<AbortSignal>((resolve) => (upstreamStarted = resolve));
-  const fetch = vi.fn((_url: RequestInfo | URL, options?: RequestInit) => {
-    const signal = options?.signal ?? (_url instanceof Request ? _url.signal : undefined);
+  const transport = syntheticSdkTransport((input, options) => {
+    const signal = options?.signal ?? (input instanceof Request ? input.signal : undefined);
     if (!signal) throw new Error('Expected an SDK transport signal.');
     upstreamStarted(signal);
     return new Promise<Response>((_resolve, reject) => {
@@ -34,10 +79,22 @@ const abortableTransport = () => {
       else signal.addEventListener('abort', abort, { once: true });
     });
   });
-  return { fetch, started };
+  return { ...transport, started };
 };
 
 describe('OpenAI file transcription integration', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('Unexpected network request in synthetic test')))
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   it.each(['gpt-4o-mini-transcribe', 'gpt-4o-transcribe'] as const)(
     'passes %s options without overriding the SDK timeout',
     async (model) => {
@@ -155,17 +212,26 @@ describe('OpenAI file transcription integration', () => {
     const controller = new AbortController();
     const pending = transcribeFile({ ...input(), signal: controller.signal }, sdk);
     const rejected = expect(pending).rejects.toBeDefined();
-    const upstreamSignal = await Promise.race([
-      transport.started,
-      pending.then(
-        () => Promise.reject(new Error('SDK request completed before reaching the transport.')),
-        (error: unknown) => Promise.reject(error)
-      )
-    ]);
-    expect(upstreamSignal.aborted).toBe(false);
-    controller.abort();
-    await rejected;
-    expect(upstreamSignal.aborted).toBe(true);
+    try {
+      const upstreamSignal = await bounded(
+        Promise.race([
+          transport.started,
+          pending.then(
+            () => Promise.reject(new Error('SDK request completed before reaching the transport.')),
+            (error: unknown) => Promise.reject(error)
+          )
+        ]),
+        'SDK transport'
+      );
+      expect(upstreamSignal.aborted).toBe(false);
+      controller.abort();
+      await bounded(Promise.resolve(rejected), 'SDK cancellation');
+      expect(upstreamSignal.aborted).toBe(true);
+      expectSyntheticSdkTransport(transport);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      if (!controller.signal.aborted) controller.abort();
+    }
   });
 
   it('preserves the real SDK timeout with a client signal and synthetic transport', async () => {
@@ -179,16 +245,25 @@ describe('OpenAI file transcription integration', () => {
     const controller = new AbortController();
     const pending = transcribeFile({ ...input(), signal: controller.signal }, sdk);
     const rejected = expect(pending).rejects.toBeDefined();
-    const upstreamSignal = await Promise.race([
-      transport.started,
-      pending.then(
-        () => Promise.reject(new Error('SDK request completed before reaching the transport.')),
-        (error: unknown) => Promise.reject(error)
-      )
-    ]);
-    await rejected;
-    expect(upstreamSignal.aborted).toBe(true);
-    expect(controller.signal.aborted).toBe(false);
+    try {
+      const upstreamSignal = await bounded(
+        Promise.race([
+          transport.started,
+          pending.then(
+            () => Promise.reject(new Error('SDK request completed before reaching the transport.')),
+            (error: unknown) => Promise.reject(error)
+          )
+        ]),
+        'SDK transport'
+      );
+      await bounded(Promise.resolve(rejected), 'SDK timeout');
+      expect(upstreamSignal.aborted).toBe(true);
+      expect(controller.signal.aborted).toBe(false);
+      expectSyntheticSdkTransport(transport);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      if (!controller.signal.aborted) controller.abort();
+    }
   });
 
   it('retains synthetic complete alignment only when all segments match the original text', async () => {
@@ -262,10 +337,10 @@ describe('authenticated upload route with the real SDK and synthetic transport',
   });
 
   it.each([
-    ['default', () => undefined],
-    ['Error', () => new Error(`${marker}-reason`)],
-    ['string', () => `${marker}-reason`],
-    ['null', () => null]
+    ['default', (): undefined => undefined],
+    ['Error', (): Error => new Error(`${marker}-reason`)],
+    ['string', (): string => `${marker}-reason`],
+    ['null', (): null => null]
   ] as const)('maps in-flight %s cancellation through the real SDK', async (_label, reason) => {
     const transport = abortableTransport();
     const sdk = new OpenAI({
@@ -279,23 +354,32 @@ describe('authenticated upload route with the real SDK and synthetic transport',
     const infoLog = vi.spyOn(console, 'info');
     const controller = new AbortController();
     const pending = transcribe(uploadRequest(controller.signal));
-    const upstreamSignal = await Promise.race([
-      transport.started,
-      pending.then(() => {
-        throw new Error('Upload ended before reaching the synthetic SDK transport.');
-      })
-    ]);
-    expect(upstreamSignal.aborted).toBe(false);
-    controller.abort(reason());
-    const response = await pending;
-    const body = await response.text();
+    try {
+      const upstreamSignal = await bounded(
+        Promise.race([
+          transport.started,
+          pending.then(() => {
+            throw new Error('Upload ended before reaching the synthetic SDK transport.');
+          })
+        ]),
+        'SDK transport'
+      );
+      expect(upstreamSignal.aborted).toBe(false);
+      controller.abort(reason());
+      const response = await bounded(pending, 'cancelled route response');
+      const body = await response.text();
 
-    expect(clientFactory.create).toHaveBeenCalledTimes(1);
-    expect(upstreamSignal.aborted).toBe(true);
-    expect(response.status).toBe(504);
-    expect(JSON.parse(body).error).toMatchObject({ code: 'TIMEOUT', retryable: true });
-    expect(body).not.toContain(marker);
-    expect(JSON.stringify([...errorLog.mock.calls, ...infoLog.mock.calls])).not.toContain(marker);
+      expect(clientFactory.create).toHaveBeenCalledTimes(1);
+      expect(upstreamSignal.aborted).toBe(true);
+      expectSyntheticSdkTransport(transport);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(response.status).toBe(504);
+      expect(JSON.parse(body).error).toMatchObject({ code: 'TIMEOUT', retryable: true });
+      expect(body).not.toContain(marker);
+      expect(JSON.stringify([...errorLog.mock.calls, ...infoLog.mock.calls])).not.toContain(marker);
+    } finally {
+      if (!controller.signal.aborted) controller.abort();
+    }
   });
 
   it('maps a real SDK timeout without an aborted client signal', async () => {
@@ -310,21 +394,30 @@ describe('authenticated upload route with the real SDK and synthetic transport',
     const errorLog = vi.spyOn(console, 'error');
     const controller = new AbortController();
     const pending = transcribe(uploadRequest(controller.signal));
-    const upstreamSignal = await Promise.race([
-      transport.started,
-      pending.then(() => {
-        throw new Error('Upload ended before reaching the synthetic SDK transport.');
-      })
-    ]);
-    const response = await pending;
-    const body = await response.text();
+    try {
+      const upstreamSignal = await bounded(
+        Promise.race([
+          transport.started,
+          pending.then(() => {
+            throw new Error('Upload ended before reaching the synthetic SDK transport.');
+          })
+        ]),
+        'SDK transport'
+      );
+      const response = await bounded(pending, 'SDK timeout response');
+      const body = await response.text();
 
-    expect(controller.signal.aborted).toBe(false);
-    expect(upstreamSignal.aborted).toBe(true);
-    expect(response.status).toBe(504);
-    expect(JSON.parse(body).error).toMatchObject({ code: 'TIMEOUT', retryable: true });
-    expect(body).not.toContain(marker);
-    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(marker);
+      expect(controller.signal.aborted).toBe(false);
+      expect(upstreamSignal.aborted).toBe(true);
+      expectSyntheticSdkTransport(transport);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(response.status).toBe(504);
+      expect(JSON.parse(body).error).toMatchObject({ code: 'TIMEOUT', retryable: true });
+      expect(body).not.toContain(marker);
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain(marker);
+    } finally {
+      if (!controller.signal.aborted) controller.abort();
+    }
   });
 
   it.each(
@@ -332,7 +425,7 @@ describe('authenticated upload route with the real SDK and synthetic transport',
       ['timeout', 'timed out'].map((wording) => [status, wording] as const)
     )
   )('maps real SDK HTTP %i with %s diagnostics', async (status, wording) => {
-    const transport = vi.fn(
+    const transport = syntheticSdkTransport(
       async () =>
         new Response(
           JSON.stringify({ error: { message: `${marker}-${wording}`, code: `${marker}-code` } }),
@@ -343,7 +436,7 @@ describe('authenticated upload route with the real SDK and synthetic transport',
       apiKey: 'synthetic-test-key',
       timeout: 1000,
       maxRetries: 0,
-      fetch: transport as typeof fetch
+      fetch: transport.fetch as typeof fetch
     });
     clientFactory.create.mockReturnValue(sdk);
     const errorLog = vi.spyOn(console, 'error');
@@ -353,7 +446,8 @@ describe('authenticated upload route with the real SDK and synthetic transport',
     const body = await response.text();
 
     expect(controller.signal.aborted).toBe(false);
-    expect(transport).toHaveBeenCalledTimes(1);
+    expectSyntheticSdkTransport(transport);
+    expect(fetch).not.toHaveBeenCalled();
     expect(response.status).toBe(status === 401 ? 503 : 502);
     expect(JSON.parse(body).error).toMatchObject({
       code: 'UPSTREAM_ERROR',

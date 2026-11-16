@@ -20,6 +20,36 @@ const privateMarker = 'SYNTHETIC_PRIVATE_PROVIDER_DIAGNOSTIC';
 const authorization = `Basic ${Buffer.from('fixture-user:fixture-password').toString('base64')}`;
 const logMethods = ['info', 'warn', 'error'] as const;
 const consoleMethods = ['log', 'info', 'warn', 'error', 'debug'] as const;
+const transcriptionEndpoint = 'https://api.openai.com/v1/audio/transcriptions';
+
+function syntheticSdkTransport(
+  handleTranscription: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+) {
+  const probe = vi.fn(() => Promise.resolve(new Response()));
+  const transcription = vi.fn(handleTranscription);
+  const unexpected = vi.fn<(url: string, method: string) => Promise<never>>(() =>
+    Promise.reject(new Error('Unexpected synthetic SDK transport request'))
+  );
+  const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (input === 'data:,' && init === undefined) return probe();
+    const url = input instanceof Request ? input.url : String(input);
+    const requestMethod = init?.method ?? (input instanceof Request ? input.method : 'GET');
+    const method = requestMethod.toUpperCase();
+    if (url === transcriptionEndpoint && method === 'POST') return transcription(input, init);
+    return unexpected(url, method);
+  });
+  return { fetch, probe, transcription, unexpected };
+}
+
+function expectSyntheticSdkTransport(transport: ReturnType<typeof syntheticSdkTransport>) {
+  expect(transport.probe).toHaveBeenCalledTimes(1);
+  expect(transport.unexpected).not.toHaveBeenCalled();
+  expect(transport.transcription).toHaveBeenCalledTimes(1);
+  const [input, init] = transport.transcription.mock.calls[0];
+  expect(input instanceof Request ? input.url : String(input)).toBe(transcriptionEndpoint);
+  const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+  expect(method.toUpperCase()).toBe('POST');
+}
 
 function uploadRequest(signal?: AbortSignal) {
   const form = new FormData();
@@ -99,7 +129,7 @@ describe('authenticated SDK provider status precedence', () => {
   )(
     'maps HTTP $upstream independently of private "$wording" text',
     async ({ upstream, response: expectedStatus, retryable, wording }) => {
-      const transport = vi.fn(
+      const transport = syntheticSdkTransport(
         async () =>
           new Response(
             JSON.stringify({
@@ -112,7 +142,7 @@ describe('authenticated SDK provider status precedence', () => {
             { status: upstream, headers: { 'content-type': 'application/json' } }
           )
       );
-      installSdk(transport as typeof fetch);
+      installSdk(transport.fetch as typeof fetch);
 
       const response = await POST(uploadRequest());
       const text = await response.text();
@@ -124,7 +154,7 @@ describe('authenticated SDK provider status precedence', () => {
         expect(JSON.parse(text).error.message).toBe('OpenAI rejected the server API key.');
       }
       expect(clientFactory.create).toHaveBeenCalledTimes(1);
-      expect(transport).toHaveBeenCalledTimes(1);
+      expectSyntheticSdkTransport(transport);
       expect(fetch).not.toHaveBeenCalled();
       expect(logger.error).toHaveBeenCalledWith(
         'transcription_failed',
@@ -136,7 +166,7 @@ describe('authenticated SDK provider status precedence', () => {
 
   it('retains a genuine SDK transport timeout with an un-aborted client signal', async () => {
     let transportSignal: AbortSignal | undefined;
-    const transport = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const transport = syntheticSdkTransport((input, init) => {
       const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
       if (!signal) throw new Error('SDK transport did not supply a signal');
       transportSignal = signal;
@@ -146,7 +176,7 @@ describe('authenticated SDK provider status precedence', () => {
         else signal.addEventListener('abort', abort, { once: true });
       });
     });
-    installSdk(transport as typeof fetch, 80);
+    installSdk(transport.fetch as typeof fetch, 80);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let response: Response;
@@ -170,7 +200,7 @@ describe('authenticated SDK provider status precedence', () => {
     }
     const text = await response.text();
 
-    expect(transport).toHaveBeenCalledTimes(1);
+    expectSyntheticSdkTransport(transport);
     expect(fetch).not.toHaveBeenCalled();
     expect(clientAbortedAtResponse).toBe(false);
     expect(transportAbortedAtResponse).toBe(true);

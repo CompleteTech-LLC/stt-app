@@ -20,12 +20,42 @@ const privateMarker = 'SYNTHETIC_PRIVATE_CANCELLATION_DETAIL';
 const authorization = `Basic ${Buffer.from('fixture-user:fixture-password').toString('base64')}`;
 const logMethods = ['info', 'warn', 'error'] as const;
 const consoleMethods = ['log', 'info', 'warn', 'error', 'debug'] as const;
+const transcriptionEndpoint = 'https://api.openai.com/v1/audio/transcriptions';
 const reasons = [
   { label: 'ordinary Error', make: () => new Error(privateMarker) },
   { label: 'string', make: () => `${privateMarker}_STRING` },
   { label: 'non-Error object', make: () => ({ detail: privateMarker }) },
   { label: 'default AbortError', make: () => undefined }
 ] as const;
+
+function syntheticSdkTransport(
+  handleTranscription: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+) {
+  const probe = vi.fn(() => Promise.resolve(new Response()));
+  const transcription = vi.fn(handleTranscription);
+  const unexpected = vi.fn<(url: string, method: string) => Promise<never>>(() =>
+    Promise.reject(new Error('Unexpected synthetic SDK transport request'))
+  );
+  const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (input === 'data:,' && init === undefined) return probe();
+    const url = input instanceof Request ? input.url : String(input);
+    const requestMethod = init?.method ?? (input instanceof Request ? input.method : 'GET');
+    const method = requestMethod.toUpperCase();
+    if (url === transcriptionEndpoint && method === 'POST') return transcription(input, init);
+    return unexpected(url, method);
+  });
+  return { fetch, probe, transcription, unexpected };
+}
+
+function expectSyntheticSdkTransport(transport: ReturnType<typeof syntheticSdkTransport>) {
+  expect(transport.probe).toHaveBeenCalledTimes(1);
+  expect(transport.unexpected).not.toHaveBeenCalled();
+  expect(transport.transcription).toHaveBeenCalledTimes(1);
+  const [input, init] = transport.transcription.mock.calls[0];
+  expect(input instanceof Request ? input.url : String(input)).toBe(transcriptionEndpoint);
+  const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+  expect(method.toUpperCase()).toBe('POST');
+}
 
 function uploadRequest(signal: AbortSignal, authenticated = true) {
   const form = new FormData();
@@ -156,7 +186,7 @@ describe('authenticated upload cancellation with real SDK transport', () => {
       const started = new Promise<AbortSignal>((resolve) => {
         markStarted = resolve;
       });
-      const transport = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const transport = syntheticSdkTransport((input, init) => {
         const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
         if (!signal) throw new Error('SDK transport did not supply a signal');
         markStarted(signal);
@@ -167,7 +197,7 @@ describe('authenticated upload cancellation with real SDK transport', () => {
           else signal.addEventListener('abort', abort, { once: true });
         });
       });
-      installSdk(transport as typeof fetch, 3000);
+      installSdk(transport.fetch as typeof fetch, 3000);
       const controller = new AbortController();
       const request = uploadRequest(controller.signal);
       const result = POST(request);
@@ -187,7 +217,7 @@ describe('authenticated upload cancellation with real SDK transport', () => {
         const response = await bounded(result, 'cancelled route response');
         expect(upstreamSignal.aborted).toBe(true);
         expect(clientFactory.create).toHaveBeenCalledTimes(1);
-        expect(transport).toHaveBeenCalledTimes(1);
+        expectSyntheticSdkTransport(transport);
         expect(fetch).not.toHaveBeenCalled();
         await expectCancellation(response);
       } finally {
@@ -200,19 +230,20 @@ describe('authenticated upload cancellation with real SDK transport', () => {
 
   it('does not classify a non-cancelled upstream failure as cancellation', async () => {
     const controller = new AbortController();
-    const transport = vi.fn(
+    const transport = syntheticSdkTransport(
       async () =>
         new Response(JSON.stringify({ error: { message: privateMarker, code: privateMarker } }), {
           status: 503,
           headers: { 'content-type': 'application/json' }
         })
     );
-    installSdk(transport as typeof fetch);
+    installSdk(transport.fetch as typeof fetch);
     const response = await bounded(POST(uploadRequest(controller.signal)), 'upstream response');
     const body = await response.text();
 
     expect(controller.signal.aborted).toBe(false);
-    expect(transport).toHaveBeenCalledTimes(1);
+    expectSyntheticSdkTransport(transport);
+    expect(fetch).not.toHaveBeenCalled();
     expect(response.status).toBe(502);
     expect(JSON.parse(body)).toMatchObject({
       error: { code: 'UPSTREAM_ERROR', retryable: true, upstreamStatus: 503 }
@@ -222,14 +253,14 @@ describe('authenticated upload cancellation with real SDK transport', () => {
 
   it('retains a normal non-cancelled text-only SDK response', async () => {
     const controller = new AbortController();
-    const transport = vi.fn(
+    const transport = syntheticSdkTransport(
       async () =>
         new Response(JSON.stringify({ text: 'synthetic transcript' }), {
           status: 200,
           headers: { 'content-type': 'application/json' }
         })
     );
-    installSdk(transport as typeof fetch);
+    installSdk(transport.fetch as typeof fetch);
     const response = await bounded(POST(uploadRequest(controller.signal)), 'successful response');
     const body = await response.text();
 
@@ -238,7 +269,7 @@ describe('authenticated upload cancellation with real SDK transport', () => {
       transcript: { text: 'synthetic transcript', segments: [] }
     });
     expect(controller.signal.aborted).toBe(false);
-    expect(transport).toHaveBeenCalledTimes(1);
+    expectSyntheticSdkTransport(transport);
     expect(fetch).not.toHaveBeenCalled();
     expectNoPrivateDiagnostics(body);
   });

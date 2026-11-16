@@ -134,7 +134,8 @@ function expectPending(channel: TestChannel, count: number) {
 }
 
 function expectFence() {
-  const alert = screen.getByRole('alert');
+  const alert = screen.getByText(/Live transcription paused:/i);
+  expect(alert).toHaveAttribute('role', 'alert');
   expect(alert).toHaveTextContent(/paused|conflict|reused|invalid|malformed|limit/i);
   expect(alert).toHaveTextContent(/stop.*start/i);
 }
@@ -226,7 +227,11 @@ beforeEach(() => {
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path =
         typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      if (path === '/api/realtime/call' && init?.method === 'POST' && allowedOffers > 0) {
+      if (
+        path === '/api/realtime/call?language=en&delay=low' &&
+        init?.method === 'POST' &&
+        allowedOffers > 0
+      ) {
         allowedOffers -= 1;
         return Promise.resolve({ ok: true, text: async () => 'synthetic answer' } as Response);
       }
@@ -559,7 +564,7 @@ describe('server event identity and turn control', () => {
     expect(document.body.textContent).not.toContain(privateText);
     logs.forEach((log) => expect(JSON.stringify(log.mock.calls)).not.toContain(privateText));
     if (typeof commit.event_id === 'string') {
-      expect(screen.getByRole('alert')).toHaveTextContent(/turn|audio|commit|error|retry|stop/i);
+      expect(screen.getByText(/The audio turn was not accepted/)).toBeVisible();
       if (finishButton().hasAttribute('disabled')) {
         expectRecoveryGuidance();
         expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();

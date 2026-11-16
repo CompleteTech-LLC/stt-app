@@ -358,7 +358,7 @@ describe('live capture resource ownership', () => {
     expect(finish).toBeEnabled();
   });
 
-  it.each([undefined, null])(
+  it.each([undefined])(
     'keeps a turn pending when an acknowledgement has an absent event ID (%s)',
     async (eventId) => {
       getUserMedia.mockResolvedValueOnce(makeStream().stream);
@@ -393,6 +393,7 @@ describe('live capture resource ownership', () => {
 
   it.each([
     { event_id: 'missing-item' },
+    { event_id: null, item_id: 'A' },
     { event_id: ' ', item_id: 'A' },
     { event_id: 'bad-predecessor', item_id: 'A', previous_item_id: -1 }
   ])('keeps a turn pending on a malformed acknowledgement %#', async (acknowledgement) => {

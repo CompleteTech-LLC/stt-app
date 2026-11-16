@@ -116,7 +116,7 @@ export class LiveUtterances {
 
   trackEvent(eventId: unknown, serialized: string) {
     if (!this.active || this.halted) return 'rejected';
-    if (eventId === undefined || eventId === null) return 'unidentified';
+    if (eventId === undefined) return 'unidentified';
     if (!this.validId(eventId)) {
       this.reject('an event ID was malformed.');
       return 'rejected';

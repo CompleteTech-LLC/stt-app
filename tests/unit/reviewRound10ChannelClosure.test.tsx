@@ -531,6 +531,7 @@ describe('owned realtime channel closure', () => {
 
     emit(current.peer, {
       type: 'input_audio_buffer.committed',
+      event_id: 'new-turn-ack',
       item_id: 'new-turn',
       previous_item_id: 'current'
     });
@@ -550,14 +551,22 @@ describe('owned realtime channel closure', () => {
     expect(fixture.track.stop).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Finish turn' }));
     expect(peer.channel.send).toHaveBeenCalledOnce();
-    expect(JSON.parse(peer.channel.send.mock.calls[0][0])).toEqual({
-      type: 'input_audio_buffer.commit'
-    });
+    const commit = JSON.parse(peer.channel.send.mock.calls[0][0]) as {
+      type: string;
+      event_id?: unknown;
+    };
+    expect(commit.type).toBe('input_audio_buffer.commit');
+    if (commit.event_id !== undefined) {
+      expect(typeof commit.event_id).toBe('string');
+      expect((commit.event_id as string).length).toBeGreaterThan(0);
+      expect((commit.event_id as string).length).toBeLessThanOrEqual(512);
+    }
     expect(screen.getByRole('button', { name: 'Finish turn' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Finish turn' }));
     expect(peer.channel.send).toHaveBeenCalledOnce();
     emit(peer, {
       type: 'input_audio_buffer.committed',
+      event_id: 'turn-ack',
       item_id: 'turn',
       previous_item_id: null
     });

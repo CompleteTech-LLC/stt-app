@@ -86,7 +86,7 @@ late events. Registration, transcription delta/completion/failure, and error eve
 server event-ID space. Exact repeated payloads with the same nonempty `event_id` are suppressed
 before ordering or turn state changes; conflicting or malformed IDs fence the session. Payloads are
 retained only in bounded browser-session memory, not displayed or logged, and released when the
-tracker finishes or the workspace changes. Omitted or null event IDs are treated as unidentified:
+tracker finishes or the workspace changes. Omitted event IDs are treated as unidentified; a present null ID is malformed:
 registration metadata can still establish order, but an unidentified acknowledgement cannot
 release a pending turn. Without an event ID, a repeated delta is indistinguishable from legitimate
 repeated text and is appended; a final transcript replaces the item's accumulated draft. These

@@ -453,9 +453,11 @@ describe('workspace ownership while live setup is pending', () => {
     const turn = screen.getByRole('button', { name: 'Finish turn' });
     expect(turn).toBeEnabled();
     fireEvent.click(turn);
-    expect(newPeer.channel.send).toHaveBeenCalledWith(
-      JSON.stringify({ type: 'input_audio_buffer.commit' })
-    );
+    expect(newPeer.channel.send).toHaveBeenCalledOnce();
+    expect(JSON.parse(newPeer.channel.send.mock.calls[0][0] as string)).toEqual({
+      type: 'input_audio_buffer.commit',
+      event_id: expect.any(String)
+    });
     if (oldPeer) expect(oldPeer.channel.send).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     expect(newMedia.stop).toHaveBeenCalled();

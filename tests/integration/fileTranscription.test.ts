@@ -1,9 +1,16 @@
 // @vitest-environment node
 
-import { describe, expect, it, vi } from 'vitest';
+import { NextRequest } from 'next/server';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import OpenAI from 'openai';
 
+import { POST as transcribe } from '@/app/api/transcribe/route';
 import { transcribeFile } from '@/src/server/fileTranscription';
+import { resetRateLimits } from '@/src/server/rateLimit';
+
+const clientFactory = vi.hoisted(() => ({ create: vi.fn() }));
+
+vi.mock('@/src/server/openaiClient', () => ({ createOpenAIClient: clientFactory.create }));
 
 const input = () => ({
   file: new File(['fake audio'], 'meeting.mp3', { type: 'audio/mpeg' }),
@@ -56,12 +63,14 @@ describe('OpenAI file transcription integration', () => {
     const controller = new AbortController();
     const request = input();
     const read = vi.spyOn(request.file, 'arrayBuffer');
+    clientFactory.create.mockClear();
     controller.abort();
 
     await expect(transcribeFile({ ...request, signal: controller.signal })).rejects.toMatchObject({
       name: 'AbortError'
     });
     expect(read).not.toHaveBeenCalled();
+    expect(clientFactory.create).not.toHaveBeenCalled();
   });
 
   it('does not start upstream work if cancellation occurs while reading the file', async () => {
@@ -209,5 +218,149 @@ describe('OpenAI file transcription integration', () => {
     const result = await transcribeFile(input(), clientWith(create));
     expect(result.text).toBe('  First second\n');
     expect(result.segments).toEqual([]);
+  });
+});
+
+describe('authenticated upload route with the real SDK and synthetic transport', () => {
+  const marker = 'synthetic-private-sdk-detail';
+  const authorization = `Basic ${Buffer.from('synthetic-user:synthetic-password').toString('base64')}`;
+
+  const uploadRequest = (signal?: AbortSignal) => {
+    const form = new FormData();
+    form.set('file', new File(['synthetic audio'], 'synthetic.mp3', { type: 'audio/mpeg' }));
+    form.set('model', 'gpt-4o-mini-transcribe');
+    return new NextRequest('http://localhost/api/transcribe', {
+      method: 'POST',
+      headers: { authorization, origin: 'http://localhost' },
+      body: form,
+      signal
+    });
+  };
+
+  beforeEach(() => {
+    vi.stubEnv('BASIC_AUTH_USER', 'synthetic-user');
+    vi.stubEnv('BASIC_AUTH_PASSWORD', 'synthetic-password');
+    vi.stubEnv('BASIC_AUTH_PUBLIC_ORIGIN', 'http://localhost');
+    vi.stubEnv('OPENAI_API_KEY', 'synthetic-test-key');
+    vi.stubEnv('MAX_UPLOAD_BYTES', '26214400');
+    vi.stubEnv('RATE_LIMIT_MAX_REQUESTS', '100');
+    vi.stubEnv('LOG_TRANSCRIPTS', 'false');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('Unexpected network request in synthetic test')))
+    );
+    clientFactory.create.mockReset();
+    resetRateLimits();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    clientFactory.create.mockReset();
+    resetRateLimits();
+  });
+
+  it.each([
+    ['default', () => undefined],
+    ['Error', () => new Error(`${marker}-reason`)],
+    ['string', () => `${marker}-reason`],
+    ['null', () => null]
+  ] as const)('maps in-flight %s cancellation through the real SDK', async (_label, reason) => {
+    const transport = abortableTransport();
+    const sdk = new OpenAI({
+      apiKey: 'synthetic-test-key',
+      timeout: 1000,
+      maxRetries: 1,
+      fetch: transport.fetch as typeof fetch
+    });
+    clientFactory.create.mockReturnValue(sdk);
+    const errorLog = vi.spyOn(console, 'error');
+    const infoLog = vi.spyOn(console, 'info');
+    const controller = new AbortController();
+    const pending = transcribe(uploadRequest(controller.signal));
+    const upstreamSignal = await Promise.race([
+      transport.started,
+      pending.then(() => {
+        throw new Error('Upload ended before reaching the synthetic SDK transport.');
+      })
+    ]);
+    expect(upstreamSignal.aborted).toBe(false);
+    controller.abort(reason());
+    const response = await pending;
+    const body = await response.text();
+
+    expect(clientFactory.create).toHaveBeenCalledTimes(1);
+    expect(upstreamSignal.aborted).toBe(true);
+    expect(response.status).toBe(504);
+    expect(JSON.parse(body).error).toMatchObject({ code: 'TIMEOUT', retryable: true });
+    expect(body).not.toContain(marker);
+    expect(JSON.stringify([...errorLog.mock.calls, ...infoLog.mock.calls])).not.toContain(marker);
+  });
+
+  it('maps a real SDK timeout without an aborted client signal', async () => {
+    const transport = abortableTransport();
+    const sdk = new OpenAI({
+      apiKey: 'synthetic-test-key',
+      timeout: 40,
+      maxRetries: 0,
+      fetch: transport.fetch as typeof fetch
+    });
+    clientFactory.create.mockReturnValue(sdk);
+    const errorLog = vi.spyOn(console, 'error');
+    const controller = new AbortController();
+    const pending = transcribe(uploadRequest(controller.signal));
+    const upstreamSignal = await Promise.race([
+      transport.started,
+      pending.then(() => {
+        throw new Error('Upload ended before reaching the synthetic SDK transport.');
+      })
+    ]);
+    const response = await pending;
+    const body = await response.text();
+
+    expect(controller.signal.aborted).toBe(false);
+    expect(upstreamSignal.aborted).toBe(true);
+    expect(response.status).toBe(504);
+    expect(JSON.parse(body).error).toMatchObject({ code: 'TIMEOUT', retryable: true });
+    expect(body).not.toContain(marker);
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(marker);
+  });
+
+  it.each(
+    [401, 403, 429, 503].flatMap((status) =>
+      ['timeout', 'timed out'].map((wording) => [status, wording] as const)
+    )
+  )('maps real SDK HTTP %i with %s diagnostics', async (status, wording) => {
+    const transport = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ error: { message: `${marker}-${wording}`, code: `${marker}-code` } }),
+          { status, headers: { 'content-type': 'application/json' } }
+        )
+    );
+    const sdk = new OpenAI({
+      apiKey: 'synthetic-test-key',
+      timeout: 1000,
+      maxRetries: 0,
+      fetch: transport as typeof fetch
+    });
+    clientFactory.create.mockReturnValue(sdk);
+    const errorLog = vi.spyOn(console, 'error');
+    const infoLog = vi.spyOn(console, 'info');
+    const controller = new AbortController();
+    const response = await transcribe(uploadRequest(controller.signal));
+    const body = await response.text();
+
+    expect(controller.signal.aborted).toBe(false);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(status === 401 ? 503 : 502);
+    expect(JSON.parse(body).error).toMatchObject({
+      code: 'UPSTREAM_ERROR',
+      retryable: status >= 500,
+      upstreamStatus: status
+    });
+    expect(body).not.toContain(marker);
+    expect(JSON.stringify([...errorLog.mock.calls, ...infoLog.mock.calls])).not.toContain(marker);
   });
 });

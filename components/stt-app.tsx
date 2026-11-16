@@ -78,6 +78,8 @@ const emptyTranscript: TranscriptDocument = {
 };
 
 const acceptedAttribute = [...acceptedMimeTypes, ...acceptedExtensions].join(',');
+const unconfirmedLiveItemLabel = '[Live item; order unconfirmed]';
+const unconfirmedEditedTextLabel = '[Edited live text; order unconfirmed]';
 
 const appendDocumentText = (
   current: TranscriptDocument,
@@ -213,6 +215,7 @@ export function SttApp() {
   const [trackerNotice, setTrackerNotice] = useState('');
   const [partial, setPartial] = useState('');
   const [orderUncertain, setOrderUncertain] = useState(false);
+  const [editedOrderUncertain, setEditedOrderUncertain] = useState(false);
   const [channelReady, setChannelReady] = useState(false);
   const [turnPending, setTurnPending] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptDocument>(emptyTranscript);
@@ -225,8 +228,12 @@ export function SttApp() {
   const liveLanguageRef = useRef(language);
   const utterancesRef = useRef(new LiveUtterances(false));
   const liveSessionRef = useRef(0);
+  const pendingSetupRef = useRef<number | null>(null);
+  const editedOrderUncertainRef = useRef(false);
+  const labeledOrderUncertainRef = useRef(false);
   const realtimeRequestRef = useRef<AbortController | null>(null);
   const fallbackRequestRef = useRef<AbortController | null>(null);
+  const fallbackUploadRef = useRef<AbortController | null>(null);
   const fallbackStopRequestedRef = useRef(false);
   const pendingFallbackRef = useRef<(() => void) | null>(null);
   const uploadRequestRef = useRef<AbortController | null>(null);
@@ -234,7 +241,8 @@ export function SttApp() {
   const transcriptText = transcript.text;
   const displayedTranscriptText = joinTranscriptText(transcriptText, partial);
   const exportDocument = appendDocumentText(transcript, partial, sttModels.realtime, liveLanguage);
-  const canExportTimed = !orderUncertain && hasTimestamps(exportDocument);
+  const exportOrderUncertain = orderUncertain || editedOrderUncertain;
+  const canExportTimed = !exportOrderUncertain && hasTimestamps(exportDocument);
   const liveStatus = liveStatusCopy[liveState];
 
   const fileHelp = useMemo(
@@ -244,6 +252,7 @@ export function SttApp() {
   );
 
   const applyFinalText = useCallback((text: string) => {
+    if (text.includes(unconfirmedLiveItemLabel)) labeledOrderUncertainRef.current = true;
     const sessionLanguage = liveLanguageRef.current;
     setTranscript((current) =>
       appendDocumentText(current, text, sttModels.realtime, sessionLanguage)
@@ -271,6 +280,7 @@ export function SttApp() {
 
   const stopMedia = useCallback(() => {
     liveSessionRef.current += 1;
+    pendingSetupRef.current = null;
     realtimeRequestRef.current?.abort();
     realtimeRequestRef.current = null;
     retirePeer();
@@ -289,11 +299,14 @@ export function SttApp() {
 
   const discardLiveDraft = useCallback(() => {
     const fallback = fallbackRequestRef.current;
+    const fallbackUploading = fallback !== null && fallbackUploadRef.current === fallback;
+    const setupPending = pendingSetupRef.current !== null;
     fallbackRequestRef.current = null;
+    fallbackUploadRef.current = null;
     fallbackStopRequestedRef.current = false;
     pendingFallbackRef.current = null;
     fallback?.abort();
-    if (fallback) {
+    if (fallback || setupPending) {
       const recorder = recorderRef.current;
       recorderRef.current = null;
       if (recorder) {
@@ -304,6 +317,7 @@ export function SttApp() {
       }
       stopMedia();
       setLiveState('stopped');
+      setLiveError('');
     }
     const tracker = utterancesRef.current;
     tracker.discard();
@@ -311,7 +325,13 @@ export function SttApp() {
     setOrderUncertain(false);
     if (fallback) {
       setTrackerNotice(
-        'The local recording was discarded because the workspace changed; it will not be transcribed.'
+        fallbackUploading
+          ? 'Cancellation was requested for the local recording transcription because the workspace changed. Its result will be discarded; audio already sent cannot be retracted and may already have been transcribed.'
+          : 'The local recording was discarded because the workspace changed; it will not be transcribed.'
+      );
+    } else if (setupPending) {
+      setTrackerNotice(
+        'Live setup stopped because the workspace changed. Start a new session to resume; audio already sent cannot be retracted.'
       );
     } else if (tracker.error) {
       setTrackerNotice(tracker.error);
@@ -324,6 +344,7 @@ export function SttApp() {
       uploadRequestRef.current = null;
       fallbackRequestRef.current?.abort();
       fallbackRequestRef.current = null;
+      fallbackUploadRef.current = null;
       fallbackStopRequestedRef.current = false;
       pendingFallbackRef.current = null;
       const recorder = recorderRef.current;
@@ -407,6 +428,7 @@ export function SttApp() {
         try {
           setLiveState('fallback-transcribing');
           const blob = new Blob(chunks, { type: format.mimeType });
+          fallbackUploadRef.current = request;
           const document = await transcribeFallbackRecording(
             blob,
             format.extension,
@@ -415,6 +437,9 @@ export function SttApp() {
           if (!isCurrent()) return;
           const remaining =
             utterancesRef.current === fallbackTracker ? fallbackTracker.finish() : '';
+          if (remaining.includes(unconfirmedLiveItemLabel)) {
+            labeledOrderUncertainRef.current = true;
+          }
           setTranscript((current) => {
             const withPending = appendDocumentText(
               current,
@@ -445,6 +470,7 @@ export function SttApp() {
         } finally {
           // This callback owns only its request; it must never close a newer session's media.
           if (fallbackRequestRef.current === request) fallbackRequestRef.current = null;
+          if (fallbackUploadRef.current === request) fallbackUploadRef.current = null;
         }
       };
       recorder.onstop = () => {
@@ -475,6 +501,7 @@ export function SttApp() {
   const cancelFallbackRecorder = useCallback(() => {
     fallbackRequestRef.current?.abort();
     fallbackRequestRef.current = null;
+    fallbackUploadRef.current = null;
     fallbackStopRequestedRef.current = false;
     pendingFallbackRef.current = null;
     const recorder = recorderRef.current;
@@ -497,6 +524,7 @@ export function SttApp() {
     if (remaining) applyFinalText(remaining);
     stopMedia();
     const session = ++liveSessionRef.current;
+    pendingSetupRef.current = session;
     liveLanguageRef.current = language;
     setLiveLanguage(language);
     setLiveError('');
@@ -761,6 +789,7 @@ export function SttApp() {
       if (session !== liveSessionRef.current) return;
       await pc.setRemoteDescription({ type: 'answer', sdp });
       if (session !== liveSessionRef.current) return;
+      pendingSetupRef.current = null;
     } catch (error) {
       if (session !== liveSessionRef.current) return;
       const message =
@@ -771,6 +800,7 @@ export function SttApp() {
         shouldAttemptLocalRecordingFallback(error)
       ) {
         retirePeer();
+        pendingSetupRef.current = null;
         try {
           startFallbackRecorder(streamRef.current, session, message);
           return;
@@ -810,8 +840,24 @@ export function SttApp() {
     stopMedia
   ]);
 
+  const resolveEditedOrder = useCallback((withLabel: boolean) => {
+    if (!editedOrderUncertainRef.current) return;
+    editedOrderUncertainRef.current = false;
+    setEditedOrderUncertain(false);
+    labeledOrderUncertainRef.current = withLabel;
+    if (withLabel) {
+      setTranscript((current) => ({
+        ...current,
+        text: !current.text.startsWith(`${unconfirmedEditedTextLabel}\n`)
+          ? `${unconfirmedEditedTextLabel}\n${current.text}`
+          : current.text
+      }));
+    }
+  }, []);
+
   const stopLive = useCallback(() => {
     if (recorderRef.current) {
+      resolveEditedOrder(true);
       const recorder = recorderRef.current;
       recorderRef.current = null;
       fallbackStopRequestedRef.current = true;
@@ -836,11 +882,12 @@ export function SttApp() {
 
     const remaining = utterancesRef.current.finish();
     if (remaining) applyFinalText(remaining);
+    resolveEditedOrder(true);
     stopMedia();
     setPartial('');
     setOrderUncertain(false);
     setLiveState('stopped');
-  }, [applyFinalText, stopMedia]);
+  }, [applyFinalText, resolveEditedOrder, stopMedia]);
 
   const discardPendingRecording = () => {
     if (!pendingFallbackRef.current) return;
@@ -916,6 +963,8 @@ export function SttApp() {
       const data = (await response.json()) as { transcript: TranscriptDocument };
       if (!isCurrent()) return;
       discardLiveDraft();
+      resolveEditedOrder(false);
+      labeledOrderUncertainRef.current = false;
       setTranscript(data.transcript);
       setUploadState('done');
     } catch (error) {
@@ -929,6 +978,8 @@ export function SttApp() {
 
   const clearWorkspace = () => {
     cancelUpload();
+    resolveEditedOrder(false);
+    labeledOrderUncertainRef.current = false;
     setTranscript(emptyTranscript);
     discardLiveDraft();
     setUploadError('');
@@ -1146,7 +1197,7 @@ export function SttApp() {
                 title="Copy transcript"
                 aria-label="Copy transcript"
                 onClick={() => navigator.clipboard.writeText(displayedTranscriptText)}
-                disabled={!displayedTranscriptText || orderUncertain}
+                disabled={!displayedTranscriptText || exportOrderUncertain}
               >
                 <Clipboard size={18} aria-hidden />
               </button>
@@ -1163,9 +1214,20 @@ export function SttApp() {
             placeholder="Transcript text appears here. You can edit it before copying or exporting."
             onChange={(event) => {
               cancelUpload();
+              const value = event.target.value;
+              const retainsUncertainty =
+                editedOrderUncertainRef.current ||
+                labeledOrderUncertainRef.current ||
+                (orderUncertain && Boolean(partial)) ||
+                (utterancesRef.current.orderUncertain &&
+                  Boolean(utterancesRef.current.preview())) ||
+                displayedTranscriptText.includes(unconfirmedLiveItemLabel) ||
+                displayedTranscriptText.includes(unconfirmedEditedTextLabel);
+              editedOrderUncertainRef.current = retainsUncertainty;
+              setEditedOrderUncertain(retainsUncertainty);
               setTranscript((current) => ({
                 ...current,
-                text: event.target.value,
+                text: value,
                 language: undefined,
                 model: 'edited',
                 // Whole-document edits cannot be aligned to the source segments.
@@ -1185,12 +1247,37 @@ export function SttApp() {
               until order is known or Stop preserves the items with explicit uncertainty labels.
             </p>
           ) : null}
+          {editedOrderUncertain ? (
+            <div className="state-detail" role="alert">
+              <p>
+                This edit may retain live text in an unconfirmed order. Later session metadata
+                cannot correct it. Keep the uncertainty label, or confirm the displayed order
+                yourself. Stop also keeps the text with an uncertainty label; Clear discards it.
+              </p>
+              <div className="button-row">
+                <button
+                  type="button"
+                  onClick={() => resolveEditedOrder(true)}
+                  disabled={!displayedTranscriptText}
+                >
+                  Keep text with order warning
+                </button>
+                <button
+                  type="button"
+                  onClick={() => resolveEditedOrder(false)}
+                  disabled={!displayedTranscriptText}
+                >
+                  Confirm edited order
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div className="export-row" aria-label="Export transcript">
             <button
               type="button"
               onClick={() => download('transcript.txt', exportTxt(exportDocument), 'text/plain')}
-              disabled={!displayedTranscriptText || orderUncertain}
+              disabled={!displayedTranscriptText || exportOrderUncertain}
             >
               <Download size={17} aria-hidden />
               TXT
@@ -1200,7 +1287,7 @@ export function SttApp() {
               onClick={() =>
                 download('transcript.json', exportJson(exportDocument), 'application/json')
               }
-              disabled={!displayedTranscriptText || orderUncertain}
+              disabled={!displayedTranscriptText || exportOrderUncertain}
             >
               <Download size={17} aria-hidden />
               JSON

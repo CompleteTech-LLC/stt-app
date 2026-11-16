@@ -6,6 +6,7 @@ import { SttApp } from '@/components/stt-app';
 type Deferred<Value> = {
   promise: Promise<Value>;
   resolve: (value: Value) => void;
+  reject: (reason: unknown) => void;
 };
 
 let pendingResolutions: Array<() => void>;
@@ -20,11 +21,13 @@ let fetchMock: ReturnType<typeof makeFetch>;
 
 function deferred<Value>(teardownValue: Value): Deferred<Value> {
   let resolve!: (value: Value) => void;
-  const promise = new Promise<Value>((complete) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<Value>((complete, fail) => {
     resolve = complete;
+    reject = fail;
   });
   pendingResolutions.push(() => resolve(teardownValue));
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function makeStream(): TestStream {
@@ -322,36 +325,210 @@ describe('live capture resource ownership', () => {
     }
   );
 
-  it.each(['clear', 'edit', 'upload'] as const)(
-    'stops and explicitly discards an active fallback on workspace %s',
-    async (action) => {
-      const media = makeStream();
-      getUserMedia.mockResolvedValueOnce(media.stream);
+  it.each([
+    ['recording', 'clear'],
+    ['recording', 'edit'],
+    ['recording', 'upload'],
+    ['stop pending', 'clear'],
+    ['stop pending', 'edit'],
+    ['stop pending', 'upload']
+  ] as const)('discards fallback audio before upload on %s workspace %s', async (phase, action) => {
+    const media = makeStream();
+    getUserMedia.mockResolvedValueOnce(media.stream);
+    render(<SttApp />);
+    const recorder = await beginFallback();
+    const oldStop = recorder.onstop;
+    if (phase === 'stop pending') fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    if (action === 'clear') fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    if (action === 'edit')
+      fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: 'Edited' } });
+    if (action === 'upload') {
+      transcriptionResponses.push(() => Promise.resolve(transcriptResponse('Uploaded')));
+      fireEvent.click(screen.getByRole('tab', { name: 'File Upload' }));
+      fireEvent.change(screen.getByLabelText(/Audio and video files accepted/), {
+        target: { files: [new File(['audio'], 'new.mp3', { type: 'audio/mpeg' })] }
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Transcribe file' }));
+      await waitFor(() => expect(screen.getByLabelText('Transcript text')).toHaveValue('Uploaded'));
+    }
+    expect(media.stop).toHaveBeenCalled();
+    expect(recorder.stop).toHaveBeenCalled();
+    expect(
+      screen.getByText(/local recording was discarded.*will not be transcribed/i)
+    ).toBeVisible();
+    expect(screen.queryByText(/audio already sent cannot be retracted/i)).not.toBeInTheDocument();
+    act(() => oldStop?.(new Event('stop')));
+    await emitRecorderStop(recorder);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => requestPath(input) === '/api/transcribe')
+    ).toHaveLength(action === 'upload' ? 1 : 0);
+  });
+
+  it.each([
+    ['microphone', 'clear', 'before new session'],
+    ['microphone', 'edit', 'before new session'],
+    ['microphone', 'upload', 'before new session'],
+    ['SDP', 'clear', 'before new session'],
+    ['SDP', 'edit', 'before new session'],
+    ['SDP', 'upload', 'before new session'],
+    ['SDP', 'edit', 'after new session']
+  ] as const)(
+    'retires pending %s setup on workspace %s (%s) without starting fallback',
+    async (phase, action, failureTiming) => {
+      const oldMedia = makeStream();
+      const newMedia = makeStream();
+      const microphone = deferred(oldMedia.stream);
+      const setup = deferred(answerResponse());
+      if (phase === 'microphone') {
+        getUserMedia.mockReturnValueOnce(microphone.promise);
+      } else {
+        getUserMedia.mockResolvedValueOnce(oldMedia.stream);
+        realtimeResponses.push(() => setup.promise);
+      }
+      getUserMedia.mockResolvedValueOnce(newMedia.stream);
       render(<SttApp />);
-      const recorder = await beginFallback();
-      if (action === 'clear') fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
-      if (action === 'edit')
-        fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: 'Edited' } });
-      if (action === 'upload') {
-        transcriptionResponses.push(() => Promise.resolve(transcriptResponse('Uploaded')));
-        fireEvent.click(screen.getByRole('tab', { name: 'File Upload' }));
-        fireEvent.change(screen.getByLabelText(/Audio and video files accepted/), {
-          target: { files: [new File(['audio'], 'new.mp3', { type: 'audio/mpeg' })] }
-        });
-        fireEvent.click(screen.getByRole('button', { name: 'Transcribe file' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+      if (phase === 'microphone') {
+        await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(1));
+      } else {
         await waitFor(() =>
-          expect(screen.getByLabelText('Transcript text')).toHaveValue('Uploaded')
+          expect(
+            fetchMock.mock.calls.filter(([input]) =>
+              requestPath(input).startsWith('/api/realtime/call')
+            )
+          ).toHaveLength(1)
         );
       }
-      expect(media.stop).toHaveBeenCalled();
-      expect(recorder.stop).toHaveBeenCalled();
-      expect(screen.getByText(/local recording was discarded/i)).toBeInTheDocument();
-      await emitRecorderStop(recorder);
+      const oldPeer = peers[0];
+      const oldMessage = oldPeer?.channel.onmessage;
+      const oldConnectionChange = oldPeer?.onconnectionstatechange;
+      const setupCall = fetchMock.mock.calls.find(([input]) =>
+        requestPath(input).startsWith('/api/realtime/call')
+      );
+      const setupSignal = setupCall?.[1]?.signal as AbortSignal | undefined;
+      let expected = '';
+      if (action === 'clear') {
+        fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+      } else if (action === 'edit') {
+        expected = 'Edited\n  note';
+        fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: expected } });
+      } else {
+        expected = 'Replacement upload';
+        transcriptionResponses.push(() => Promise.resolve(transcriptResponse(expected)));
+        fireEvent.click(screen.getByRole('tab', { name: 'File Upload' }));
+        fireEvent.change(screen.getByLabelText(/Audio and video files accepted/), {
+          target: { files: [new File(['synthetic audio'], 'sample.mp3', { type: 'audio/mpeg' })] }
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Transcribe file' }));
+        await waitFor(() => expect(screen.getByLabelText('Transcript text')).toHaveValue(expected));
+        fireEvent.click(screen.getByRole('tab', { name: 'Live Mic' }));
+      }
+      expect(screen.getByText(/Live setup stopped because the workspace changed/)).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      if (phase === 'SDP') {
+        expect(setupSignal?.aborted).toBe(true);
+        expect(oldMedia.stop).toHaveBeenCalled();
+        expect(oldPeer.close).toHaveBeenCalled();
+      }
+      const rejectSetup = async () => {
+        await act(async () => {
+          setup.reject(new TypeError('Synthetic SDP failure'));
+          await expect(setup.promise).rejects.toThrow('Synthetic SDP failure');
+        });
+      };
+      if (phase === 'SDP' && failureTiming === 'before new session') {
+        await rejectSetup();
+        expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
+        fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+        expect(recorders).toHaveLength(0);
+      }
+
+      realtimeResponses.push(() => Promise.resolve(answerResponse()));
+      await beginLive();
+      if (phase === 'microphone') {
+        await resolveDeferred(microphone, oldMedia.stream);
+      } else {
+        if (failureTiming === 'after new session') await rejectSetup();
+        act(() => {
+          oldPeer.connectionState = 'failed';
+          oldConnectionChange?.(new Event('connectionstatechange'));
+          oldMessage?.(
+            new MessageEvent('message', {
+              data: JSON.stringify({
+                type: 'conversation.item.input_audio_transcription.completed',
+                item_id: 'stale',
+                previous_item_id: null,
+                transcript: 'stale speech'
+              })
+            })
+          );
+        });
+      }
+      expect(oldMedia.stop).toHaveBeenCalled();
+      expect(newMedia.stop).not.toHaveBeenCalled();
+      expect(peers.at(-1)?.close).not.toHaveBeenCalled();
+      expect(recorders).toHaveLength(0);
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(expected);
+      emitTranscript(peers.at(-1)!, 'new-session-item', 'New speech');
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(
+        expected ? `${expected} New speech` : 'New speech'
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
       expect(
         fetchMock.mock.calls.filter(([input]) => requestPath(input) === '/api/transcribe')
       ).toHaveLength(action === 'upload' ? 1 : 0);
     }
   );
+
+  it('keeps pending setup and normal fallback when a replacement upload fails', async () => {
+    const media = makeStream();
+    const setup = deferred(answerResponse());
+    getUserMedia.mockResolvedValueOnce(media.stream);
+    realtimeResponses.push(() => setup.promise);
+    transcriptionResponses.push(
+      () =>
+        Promise.resolve({
+          ok: false,
+          status: 400,
+          json: async () => ({ error: { message: 'Synthetic upload failure' } })
+        } as Response),
+      () => Promise.resolve(transcriptResponse('Normal fallback'))
+    );
+    render(<SttApp />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          requestPath(input).startsWith('/api/realtime/call')
+        )
+      ).toHaveLength(1)
+    );
+    const setupSignal = fetchMock.mock.calls[0][1]?.signal as AbortSignal;
+    fireEvent.click(screen.getByRole('tab', { name: 'File Upload' }));
+    fireEvent.change(screen.getByLabelText(/Audio and video files accepted/), {
+      target: { files: [new File(['synthetic audio'], 'sample.mp3', { type: 'audio/mpeg' })] }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Transcribe file' }));
+    await screen.findByText('Synthetic upload failure');
+    expect(setupSignal.aborted).toBe(false);
+    expect(media.stop).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('tab', { name: 'Live Mic' }));
+    await act(async () => {
+      setup.reject(new TypeError('Synthetic SDP failure'));
+      await expect(setup.promise).rejects.toThrow('Synthetic SDP failure');
+    });
+    await screen.findByText('Recording locally');
+    expect(recorders).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await emitRecorderStop(recorders[0]);
+    await waitFor(() =>
+      expect(screen.getByLabelText('Transcript text')).toHaveValue('Normal fallback')
+    );
+    expect(
+      fetchMock.mock.calls.filter(([input]) => requestPath(input) === '/api/transcribe')
+    ).toHaveLength(2);
+  });
 
   it('retires old peer events and promptly releases an unsolicited recorder stop', async () => {
     const media = makeStream();
@@ -570,9 +747,12 @@ describe('live capture resource ownership', () => {
       const recorder = await beginFallback();
       fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
       await emitRecorderStop(recorder);
-      expect(
-        fetchMock.mock.calls.filter(([input]) => requestPath(input) === '/api/transcribe')
-      ).toHaveLength(1);
+      const fallbackCalls = fetchMock.mock.calls.filter(
+        ([input]) => requestPath(input) === '/api/transcribe'
+      );
+      expect(fallbackCalls).toHaveLength(1);
+      const fallbackSignal = fallbackCalls[0][1]?.signal as AbortSignal;
+      expect(fallbackSignal.aborted).toBe(false);
 
       let expected = '';
       if (action === 'clear') {
@@ -592,8 +772,16 @@ describe('live capture resource ownership', () => {
       }
 
       expect(screen.getByLabelText('Transcript text')).toHaveValue(expected);
+      expect(fallbackSignal.aborted).toBe(true);
+      expect(
+        screen.getByText(/Cancellation was requested.*result will be discarded/i)
+      ).toHaveTextContent(
+        /audio already sent cannot be retracted.*may already have been transcribed/i
+      );
+      expect(screen.queryByText(/will not be transcribed/i)).not.toBeInTheDocument();
       await resolveDeferred(transcription, transcriptResponse('stale fallback'));
       expect(screen.getByLabelText('Transcript text')).toHaveValue(expected);
+      expect(screen.getByText(/Cancellation was requested/)).toBeVisible();
     }
   );
 

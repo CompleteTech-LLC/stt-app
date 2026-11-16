@@ -31,6 +31,14 @@ item; an item with an unknown predecessor is provisional and is not irreversibly
 metadata can reorder provisional items. While their order is unconfirmed the preview is provisional
 and Copy/TXT/JSON are disabled. Stop retains available text, marking each unresolved item
 `[Live item; order unconfirmed]` so the exported sequence does not claim to be chronological.
+Editing a provisional preview fences that session, so late metadata cannot repair the edited text.
+Any nonempty edit made while provisional text is present remains unexportable until you explicitly
+confirm its displayed order or keep it with an `[Edited live text; order unconfirmed]` label. Stop
+also applies that label, even if the edit currently has no text. Use **Clear** or successfully
+replace the workspace with an upload to discard the uncertain edit; erasing the textarea alone does
+not resolve it. The label leaves the edited text and its whitespace intact.
+Editing text that already contains an uncertainty label also requires an explicit choice again,
+so removing the label in an ordinary edit cannot silently turn unconfirmed order into fact.
 Contradictory or duplicate first-item metadata, conflicting terminal events, and conflicting
 audio/non-audio identities fence the session. A failed predecessor is terminal: available partial
 text is retained, successors can continue, and the workspace shows a warning.
@@ -47,9 +55,13 @@ from that session**, including events for unknown predecessors. Missing or confl
 malformed tracked events, unexpected transcript fields, contradictory ordering, or resource limits
 also pause acceptance of further events rather than guessing their identity or order. A visible
 message asks you to Stop and Start a new session; the microphone is not automatically stopped by
-this realtime transcript fence. During local fallback recording, a workspace edit, clear, or
-successful replacement upload instead stops capture and explicitly discards that recording; it
-will not be transcribed. A successful fallback transcription appends to existing text and any
+this realtime transcript fence. If microphone permission or realtime setup is still pending, a
+workspace edit, clear, or successful replacement upload instead retires that setup and stops any
+acquired capture; that session cannot later start fallback recording. During local fallback
+recording, the same actions stop capture and discard the recording before upload, so it will not be
+transcribed. If fallback transcription is already in flight, cancellation is best effort: the result
+is discarded, but audio already sent cannot be retracted and may already have been transcribed.
+A successful fallback transcription appends to existing text and any
 retained live draft instead of replacing them. Retry while fallback recording discards that recording
 and reports the disposition. If a recorder stops unexpectedly, capture is released immediately and
 its audio stays in this tab until you choose **Transcribe recording** or **Discard recording**; it

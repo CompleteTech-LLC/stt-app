@@ -50,7 +50,9 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
       signal
     });
 
+    signal.throwIfAborted();
     const body = await response.text();
+    signal.throwIfAborted();
 
     if (!response.ok) {
       const upstreamStatus = getUpstreamStatus(response.status);
@@ -79,6 +81,11 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
       sdp: body,
       model: config.models.realtime
     };
+  } catch (error) {
+    if (controller.signal.aborted && !input.signal?.aborted && !(error instanceof AppError)) {
+      controller.signal.throwIfAborted();
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }

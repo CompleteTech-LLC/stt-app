@@ -122,17 +122,19 @@ beforeEach(() => {
     revokeObjectURL: vi.fn()
   });
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
-  vi.stubGlobal(
-    'navigator',
-    Object.assign(Object.create(navigator), {
-      mediaDevices: {
-        getUserMedia: vi.fn().mockResolvedValue({
-          getAudioTracks: () => [track],
-          getTracks: () => [track]
-        })
-      }
-    })
-  );
+  const testNavigator = Object.assign(Object.create(navigator), {
+    mediaDevices: {
+      getUserMedia: vi.fn().mockResolvedValue({
+        getAudioTracks: () => [track],
+        getTracks: () => [track]
+      })
+    }
+  });
+  Object.defineProperty(testNavigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: vi.fn().mockResolvedValue(undefined) }
+  });
+  vi.stubGlobal('navigator', testNavigator);
 });
 
 afterEach(() => {
@@ -455,6 +457,247 @@ describe('identified live items', () => {
     expect(await readDownload('TXT')).toBe(`${text}\n`);
     expect(JSON.parse(await readDownload('JSON')).text).toBe(text);
   });
+
+  it('blocks edited provisional exports through late metadata and labels on Stop', async () => {
+    render(<SttApp />);
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: '  Earlier\n' }
+    });
+    await startLive();
+    emitTranscript('completed', 'second', 'B');
+    emitTranscript('completed', 'first', 'A');
+    const edited = '  Earlier\nsecond first!\n';
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('  Earlier\nsecond first');
+    fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: edited } });
+    expect(screen.getByText(/This edit may retain live text/)).toBeVisible();
+    for (const name of ['Copy transcript', 'TXT', 'JSON', 'SRT', 'VTT']) {
+      expect(getExportButton(name)).toBeDisabled();
+      fireEvent.click(getExportButton(name));
+    }
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    expect(downloads).toHaveLength(0);
+
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    expect(screen.getByLabelText('Transcript text')).toHaveValue(edited);
+    expect(getExportButton('Copy transcript')).toBeDisabled();
+    expect(getExportButton('TXT')).toBeDisabled();
+    expect(getExportButton('JSON')).toBeDisabled();
+
+    fireEvent.click(getExportButton('Stop'));
+    const labeled = `[Edited live text; order unconfirmed]\n${edited}`;
+    expect(screen.getByLabelText('Transcript text')).toHaveValue(labeled);
+    fireEvent.click(getExportButton('Copy transcript'));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(labeled);
+    expect(await readDownload('TXT')).toBe(labeled);
+    expect(JSON.parse(await readDownload('JSON'))).toMatchObject({
+      text: labeled,
+      model: 'edited',
+      segments: []
+    });
+    expect(JSON.parse(await readDownload('JSON')).language).toBeUndefined();
+  });
+
+  it('allows ordinary edits after late metadata has established item order', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('completed', 'second', 'B');
+    emitTranscript('completed', 'first', 'A');
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: 'first second!' }
+    });
+    expect(screen.queryByText(/This edit may retain live text/)).not.toBeInTheDocument();
+    expect(await readDownload('TXT')).toBe('first second!\n');
+    expect(JSON.parse(await readDownload('JSON'))).toMatchObject({
+      text: 'first second!',
+      model: 'edited',
+      segments: []
+    });
+  });
+
+  it('keeps uncertainty when an edit races metadata resolving the displayed preview', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('completed', 'second', 'B');
+    emitTranscript('completed', 'first', 'A');
+    act(() => {
+      channel.onmessage?.({
+        data: JSON.stringify({
+          type: 'input_audio_buffer.committed',
+          item_id: 'B',
+          previous_item_id: 'A'
+        })
+      });
+      channel.onmessage?.({
+        data: JSON.stringify({
+          type: 'input_audio_buffer.committed',
+          item_id: 'A',
+          previous_item_id: null
+        })
+      });
+      fireEvent.change(screen.getByLabelText('Transcript text'), {
+        target: { value: 'second first!' }
+      });
+    });
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('second first!');
+    expect(getExportButton('Copy transcript')).toBeDisabled();
+    expect(getExportButton('TXT')).toBeDisabled();
+    expect(getExportButton('JSON')).toBeDisabled();
+    fireEvent.click(getExportButton('Stop'));
+    expect(await readDownload('TXT')).toBe(
+      '[Edited live text; order unconfirmed]\nsecond first!\n'
+    );
+  });
+
+  it.each(['Keep text with order warning', 'Confirm edited order'] as const)(
+    'requires the explicit %s choice before exporting an edited provisional preview',
+    async (choice) => {
+      render(<SttApp />);
+      await startLive();
+      emitTranscript('completed', 'second', 'B');
+      emitTranscript('completed', 'first', 'A');
+      fireEvent.change(screen.getByLabelText('Transcript text'), {
+        target: { value: 'second first!' }
+      });
+      expect(getExportButton('TXT')).toBeDisabled();
+      fireEvent.click(getExportButton(choice));
+      const expected =
+        choice === 'Keep text with order warning'
+          ? '[Edited live text; order unconfirmed]\nsecond first!'
+          : 'second first!';
+      expect(await readDownload('TXT')).toBe(`${expected}\n`);
+      expect(JSON.parse(await readDownload('JSON')).text).toBe(expected);
+      fireEvent.click(getExportButton('Stop'));
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(expected);
+    }
+  );
+
+  it.each(['edited label', 'stopped item labels'] as const)(
+    'does not silently export retained provisional text when removing %s',
+    async (source) => {
+      render(<SttApp />);
+      await startLive();
+      emitTranscript('completed', 'second', 'B');
+      emitTranscript('completed', 'first', 'A');
+      if (source === 'edited label') {
+        fireEvent.change(screen.getByLabelText('Transcript text'), {
+          target: { value: 'second first!' }
+        });
+        fireEvent.click(getExportButton('Keep text with order warning'));
+      } else {
+        fireEvent.click(getExportButton('Stop'));
+      }
+      fireEvent.change(screen.getByLabelText('Transcript text'), {
+        target: { value: 'second first!' }
+      });
+      expect(getExportButton('Copy transcript')).toBeDisabled();
+      expect(getExportButton('TXT')).toBeDisabled();
+      expect(getExportButton('JSON')).toBeDisabled();
+      fireEvent.click(getExportButton('Keep text with order warning'));
+      expect(await readDownload('TXT')).toBe(
+        '[Edited live text; order unconfirmed]\nsecond first!\n'
+      );
+    }
+  );
+
+  it('fences an edit queued in the same batch as an unresolved Stop', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('completed', 'second', 'B');
+    emitTranscript('completed', 'first', 'A');
+    act(() => {
+      fireEvent.click(getExportButton('Stop'));
+      fireEvent.change(screen.getByLabelText('Transcript text'), {
+        target: { value: 'second first!' }
+      });
+    });
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('second first!');
+    expect(getExportButton('Copy transcript')).toBeDisabled();
+    expect(getExportButton('TXT')).toBeDisabled();
+    expect(getExportButton('JSON')).toBeDisabled();
+    fireEvent.click(getExportButton('Keep text with order warning'));
+    expect(await readDownload('TXT')).toBe(
+      '[Edited live text; order unconfirmed]\nsecond first!\n'
+    );
+  });
+
+  it('keeps a retained edited-order warning without duplicating it', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('completed', 'second', 'B');
+    emitTranscript('completed', 'first', 'A');
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: 'second first!' }
+    });
+    fireEvent.click(getExportButton('Keep text with order warning'));
+    const edited = '[Edited live text; order unconfirmed]\nsecond first!?';
+    fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: edited } });
+    expect(getExportButton('TXT')).toBeDisabled();
+    fireEvent.click(getExportButton('Keep text with order warning'));
+    expect(await readDownload('TXT')).toBe(`${edited}\n`);
+  });
+
+  it('retains uncertainty when an erased edit is restored before an explicit choice', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('completed', 'second', 'B');
+    emitTranscript('completed', 'first', 'A');
+    fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: '' } });
+    expect(getExportButton('Keep text with order warning')).toBeDisabled();
+    expect(getExportButton('Confirm edited order')).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: 'second first!' }
+    });
+    expect(getExportButton('Copy transcript')).toBeDisabled();
+    expect(getExportButton('TXT')).toBeDisabled();
+    expect(getExportButton('JSON')).toBeDisabled();
+    fireEvent.click(getExportButton('Stop'));
+    expect(await readDownload('TXT')).toBe(
+      '[Edited live text; order unconfirmed]\nsecond first!\n'
+    );
+  });
+
+  it('retains a warning when Stop follows an erased provisional edit', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('completed', 'second', 'B');
+    emitTranscript('completed', 'first', 'A');
+    fireEvent.change(screen.getByLabelText('Transcript text'), { target: { value: '' } });
+    fireEvent.click(getExportButton('Stop'));
+    expect(screen.getByLabelText('Transcript text')).toHaveValue(
+      '[Edited live text; order unconfirmed]\n'
+    );
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: 'second first!' }
+    });
+    expect(getExportButton('TXT')).toBeDisabled();
+    expect(getExportButton('JSON')).toBeDisabled();
+  });
+
+  it.each(['clear workspace', 'replacement upload'] as const)(
+    'discards edited provisional text on %s',
+    async (action) => {
+      render(<SttApp />);
+      await startLive();
+      emitTranscript('completed', 'second', 'B');
+      emitTranscript('completed', 'first', 'A');
+      fireEvent.change(screen.getByLabelText('Transcript text'), {
+        target: { value: 'second first!' }
+      });
+      if (action === 'clear workspace') {
+        fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+        fireEvent.change(screen.getByLabelText('Transcript text'), {
+          target: { value: 'Entirely new text' }
+        });
+        expect(await readDownload('TXT')).toBe('Entirely new text\n');
+      } else {
+        await uploadTranscript();
+        expect(JSON.parse(await readDownload('JSON'))).toEqual(uploadedTranscript);
+      }
+    }
+  );
   it.each([
     { description: 'empty', content: [] },
     { description: 'absent', content: undefined },
@@ -748,7 +991,11 @@ describe('identified live items', () => {
       expect(screen.getByLabelText('Transcript text')).toHaveValue(
         action === 'clear' ? '' : action === 'edit' ? 'Edited' : 'Original transcript.'
       );
-      expect(screen.getByRole('alert')).toHaveTextContent(/workspace changed.*Stop and Start/);
+      expect(screen.getByText(/workspace changed.*Stop and Start/)).toBeInTheDocument();
+      if (action === 'edit') {
+        expect(getExportButton('TXT')).toBeDisabled();
+        fireEvent.click(getExportButton('Confirm edited order'));
+      }
       if (action === 'clear') expect(getExportButton('TXT')).toBeDisabled();
       else {
         expect(await readDownload('TXT')).toBe(
@@ -1004,7 +1251,11 @@ describe('identified live items', () => {
       expect(screen.getByLabelText('Transcript text')).toHaveValue(
         action === 'clear' ? '' : action === 'edit' ? 'Edited' : 'Original transcript.'
       );
-      expect(screen.getByRole('alert')).toHaveTextContent(/workspace changed/);
+      expect(screen.getByText(/workspace changed/)).toBeInTheDocument();
+      if (action === 'edit') {
+        expect(getExportButton('TXT')).toBeDisabled();
+        fireEvent.click(getExportButton('Confirm edited order'));
+      }
       if (action === 'replace') fireEvent.click(screen.getByRole('tab', { name: 'Live Mic' }));
       fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
       await startLive();

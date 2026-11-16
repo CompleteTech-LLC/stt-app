@@ -27,6 +27,7 @@ export async function POST(request: NextRequest) {
     validateRequestSize(request.headers.get('content-length'), config.limits.maxUploadBytes);
 
     const form = await request.formData();
+    request.signal.throwIfAborted();
     const file = form.get('file');
 
     if (!(file instanceof File)) {
@@ -60,6 +61,7 @@ export async function POST(request: NextRequest) {
       prompt: fields.prompt,
       signal: request.signal
     });
+    request.signal.throwIfAborted();
 
     logger.info('transcription_completed', {
       size: metadata.size,
@@ -71,7 +73,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ transcript });
   } catch (error) {
-    const appError = toAppError(error);
+    const appError = toAppError(error, request.signal);
     logger.error('transcription_failed', {
       code: appError.code,
       status: appError.status,

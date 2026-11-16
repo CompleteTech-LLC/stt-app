@@ -29,8 +29,12 @@ export const getUpstreamStatus = (status: unknown): number | undefined =>
     ? status
     : undefined;
 
-export const toAppError = (error: unknown): AppError => {
-  if (error instanceof AppError) return error;
+const timeoutError = () =>
+  new AppError('TIMEOUT', 'The transcription request timed out. Try a shorter file.', 504, true);
+
+export const toAppError = (error: unknown, signal?: AbortSignal): AppError => {
+  if (error instanceof AppError && !(signal?.aborted && error === signal.reason)) return error;
+  if (signal?.aborted) return timeoutError();
 
   if (error instanceof ZodError) {
     return new AppError('BAD_REQUEST', error.issues[0]?.message || 'Invalid request.', 400);
@@ -38,31 +42,7 @@ export const toAppError = (error: unknown): AppError => {
 
   if (error instanceof Error) {
     const upstreamStatus = getUpstreamStatus((error as { status?: unknown }).status);
-    if (
-      upstreamStatus !== 401 &&
-      (error.name === 'AbortError' ||
-        error.name === 'TimeoutError' ||
-        error.name === 'APIConnectionTimeoutError' ||
-        error.message.toLowerCase().includes('timeout') ||
-        /\btimed[\s-]+out\b/i.test(error.message))
-    ) {
-      return new AppError(
-        'TIMEOUT',
-        'The transcription request timed out. Try a shorter file.',
-        504,
-        true
-      );
-    }
-
-    if (error.message === 'OPENAI_API_KEY is missing') {
-      return new AppError(
-        'MISSING_API_KEY',
-        'OpenAI API key is not configured on the server.',
-        503
-      );
-    }
-
-    if (upstreamStatus !== undefined && upstreamStatus >= 400) {
+    if (upstreamStatus !== undefined) {
       return new AppError(
         'UPSTREAM_ERROR',
         upstreamStatus === 401
@@ -71,6 +51,24 @@ export const toAppError = (error: unknown): AppError => {
         upstreamStatus === 401 ? 503 : 502,
         upstreamStatus >= 500,
         upstreamStatus
+      );
+    }
+
+    if (
+      error.name === 'AbortError' ||
+      error.name === 'TimeoutError' ||
+      error.name === 'APIConnectionTimeoutError' ||
+      error.message.toLowerCase().includes('timeout') ||
+      /\btimed[\s-]+out\b/i.test(error.message)
+    ) {
+      return timeoutError();
+    }
+
+    if (error.message === 'OPENAI_API_KEY is missing') {
+      return new AppError(
+        'MISSING_API_KEY',
+        'OpenAI API key is not configured on the server.',
+        503
       );
     }
   }

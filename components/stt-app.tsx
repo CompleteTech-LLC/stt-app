@@ -183,12 +183,14 @@ export function SttApp() {
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
-  const fallbackChunksRef = useRef<Blob[]>([]);
   const utterancesRef = useRef(new LiveUtterances());
   const liveSessionRef = useRef(0);
   const realtimeRequestRef = useRef<AbortController | null>(null);
+  const fallbackRequestRef = useRef<AbortController | null>(null);
 
   const discardLiveDraft = useCallback(() => {
+    fallbackRequestRef.current?.abort();
+    setLiveState((current) => (current === 'fallback-transcribing' ? 'stopped' : current));
     utterancesRef.current.discard();
     setPartial('');
   }, []);
@@ -236,6 +238,8 @@ export function SttApp() {
 
   useEffect(() => {
     return () => {
+      fallbackRequestRef.current?.abort();
+      fallbackRequestRef.current = null;
       const recorder = recorderRef.current;
       recorderRef.current = null;
       if (recorder) {
@@ -249,7 +253,7 @@ export function SttApp() {
   }, [stopMedia]);
 
   const transcribeFallbackRecording = useCallback(
-    async (blob: Blob) => {
+    async (blob: Blob, signal: AbortSignal) => {
       const fallbackFile = new File([blob], `live-recording-${Date.now()}.webm`, {
         type: blob.type || 'audio/webm'
       });
@@ -258,33 +262,42 @@ export function SttApp() {
       body.set('language', language);
       body.set('model', fileModel);
 
-      const response = await fetch('/api/transcribe', { method: 'POST', body });
+      const response = await fetch('/api/transcribe', { method: 'POST', body, signal });
       if (!response.ok) throw await readApiFailure(response);
       const data = (await response.json()) as { transcript: TranscriptDocument };
-      setTranscript(data.transcript);
-      discardLiveDraft();
+      return data.transcript;
     },
-    [discardLiveDraft, fileModel, language]
+    [fileModel, language]
   );
 
   const startFallbackRecorder = useCallback(
     (stream: MediaStream, reason: string) => {
-      fallbackChunksRef.current = [];
+      const request = new AbortController();
+      fallbackRequestRef.current = request;
+      const chunks: Blob[] = [];
       const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      const isCurrent = () => fallbackRequestRef.current === request && !request.signal.aborted;
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) fallbackChunksRef.current.push(event.data);
+        if (isCurrent() && event.data.size > 0) chunks.push(event.data);
       };
       recorder.onstop = async () => {
+        if (!isCurrent()) return;
         try {
           setLiveState('fallback-transcribing');
-          const blob = new Blob(fallbackChunksRef.current, { type: 'audio/webm' });
-          await transcribeFallbackRecording(blob);
+          const blob = new Blob(chunks, { type: 'audio/webm' });
+          const document = await transcribeFallbackRecording(blob, request.signal);
+          if (!isCurrent()) return;
+          setTranscript(document);
+          utterancesRef.current.discard();
+          setPartial('');
           setLiveState('stopped');
         } catch (error) {
+          if (!isCurrent()) return;
           setLiveError(error instanceof Error ? error.message : 'Fallback transcription failed.');
           setLiveState('error');
         } finally {
-          stopMedia();
+          // This callback owns only its request; it must never close a newer session's media.
+          if (fallbackRequestRef.current === request) fallbackRequestRef.current = null;
         }
       };
       recorderRef.current = recorder;
@@ -292,10 +305,22 @@ export function SttApp() {
       setLiveError(`${reason} Recording locally in this tab and transcribing after Stop.`);
       setLiveState('fallback-recording');
     },
-    [stopMedia, transcribeFallbackRecording]
+    [transcribeFallbackRecording]
   );
 
   const startLive = useCallback(async () => {
+    fallbackRequestRef.current?.abort();
+    fallbackRequestRef.current = null;
+    const oldRecorder = recorderRef.current;
+    recorderRef.current = null;
+    if (oldRecorder) {
+      oldRecorder.ondataavailable = null;
+      oldRecorder.onstop = null;
+      if (oldRecorder.state !== 'inactive') oldRecorder.stop();
+    }
+    const remaining = utterancesRef.current.finish();
+    if (remaining.trim()) applyFinalText(remaining);
+    stopMedia();
     const session = ++liveSessionRef.current;
     setLiveError('');
     utterancesRef.current = new LiveUtterances();
@@ -318,6 +343,10 @@ export function SttApp() {
         if (session !== liveSessionRef.current) return;
         if (pc.connectionState === 'connected') setLiveState('live');
         if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          const remaining = utterancesRef.current.finish();
+          if (remaining.trim()) applyFinalText(remaining);
+          setPartial('');
+          stopMedia();
           setLiveError('Realtime connection was interrupted. Stop and retry.');
           setLiveState('error');
         }
@@ -427,8 +456,13 @@ export function SttApp() {
 
   const stopLive = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-      recorderRef.current.stop();
+      const recorder = recorderRef.current;
       recorderRef.current = null;
+      stopMedia();
+      setLiveState(
+        fallbackRequestRef.current?.signal.aborted ? 'stopped' : 'fallback-transcribing'
+      );
+      recorder.stop();
       return;
     }
 

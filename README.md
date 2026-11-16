@@ -44,11 +44,18 @@ audio/non-audio identities fence the session. A failed predecessor is terminal: 
 text is retained, successors can continue, and the workspace shows a warning.
 
 Realtime turn detection is disabled for the configured model. Press **Finish turn** after speaking
-to send an explicit `input_audio_buffer.commit`; listening continues. Wait for transcription and
-ordering metadata before pressing Stop. Stop releases capture immediately and does not wait for a
-commit or final response; any available unresolved text is retained with the labels described above.
-No periodic commits are sent. These controls have synthetic coverage only, not live provider or
-browser-media qualification.
+to send an explicit `input_audio_buffer.commit`; listening continues. Each commit has a distinct
+client event ID. A new, identified server acknowledgement releases the pending turn; an error does
+so only when its nested client event ID matches that turn. The server acknowledgement does not echo
+the client ID, so this assumes the one outstanding commit receives its acknowledgement before the
+next commit. An acknowledgement without a server event ID cannot safely release a turn: Stop and
+retry, or wait for an identified acknowledgement. Wait for transcription and ordering metadata
+before pressing Stop. Stop releases capture immediately and does not wait for a commit or final
+response; any available unresolved text is retained with the labels described above. If the active
+data channel closes, capture stops and Retry is available; uncommitted audio and pending results may
+be lost, and audio already sent cannot be retracted. No recording is uploaded or turn committed
+automatically. No periodic commits are sent. These controls have synthetic coverage only, not live
+provider or browser-media qualification.
 
 Clearing, editing, or replacing the workspace during a live session fences **all subsequent events
 from that session**, including events for unknown predecessors. Missing or conflicting item IDs,
@@ -72,15 +79,18 @@ repeated in the new session.
 
 For one session, the tracker retains at most 1,024 item IDs (including referenced predecessors),
 4,096 event IDs, and 1,000,000 UTF-16 code units each of pending transcript text, resolved item
-text, and text retained for event deduplication. Each item or event ID is limited to 256 code
-units. A data-channel message over 1,100,000 code units is also refused before JSON parsing.
+text, and serialized event payloads retained for deduplication. Each item or event ID is limited to
+256 code units. A data-channel message over 1,100,000 code units is also refused before JSON parsing.
 Reaching a limit fences the session instead of evicting IDs that could still be needed to reject
-late events. Exact repeated transcription delta, completion, or failure events with the same
-nonempty `event_id` are suppressed within the session; conflicting reuse among those events fences
-it. Registration-event IDs are not tracked or compared with transcription-event IDs. Without an
-event ID, a repeated delta is indistinguishable from legitimate repeated text and is appended; a
-final transcript replaces the item's accumulated draft. These rules have synthetic test coverage,
-not live provider qualification.
+late events. Registration, transcription delta/completion/failure, and error events share the same
+server event-ID space. Exact repeated payloads with the same nonempty `event_id` are suppressed
+before ordering or turn state changes; conflicting or malformed IDs fence the session. Payloads are
+retained only in bounded browser-session memory, not displayed or logged, and released when the
+tracker finishes or the workspace changes. Omitted or null event IDs are treated as unidentified:
+registration metadata can still establish order, but an unidentified acknowledgement cannot
+release a pending turn. Without an event ID, a repeated delta is indistinguishable from legitimate
+repeated text and is appended; a final transcript replaces the item's accumulated draft. These
+rules have synthetic test coverage, not live provider qualification.
 
 ## Architecture
 

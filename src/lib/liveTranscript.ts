@@ -23,12 +23,14 @@ type LiveItem = {
   terminal?: 'non-audio' | 'failed';
 };
 
-type TrackedEvent = {
-  itemId: string;
-  kind: 'partial' | 'final' | 'failed';
-  text: string;
-  previous?: unknown;
-};
+type TrackedEvent =
+  | {
+      itemId: string;
+      kind: 'partial' | 'final' | 'failed';
+      text: string;
+      previous?: unknown;
+    }
+  | { serialized: string };
 
 type ResolvedItem = {
   terminal: 'final' | 'non-audio' | 'failed';
@@ -112,10 +114,38 @@ export class LiveUtterances {
     return true;
   }
 
+  trackEvent(eventId: unknown, serialized: string) {
+    if (!this.active || this.halted) return 'rejected';
+    if (eventId === undefined || eventId === null) return 'unidentified';
+    if (!this.validId(eventId)) {
+      this.reject('an event ID was malformed.');
+      return 'rejected';
+    }
+    const existing = this.events.get(eventId);
+    if (existing) {
+      if (!('serialized' in existing) || existing.serialized !== serialized) {
+        this.reject('an event ID was reused with different identity or content.');
+        return 'rejected';
+      }
+      return 'duplicate';
+    }
+    if (this.events.size >= MAX_TRACKED_EVENTS) {
+      this.reject('the session event limit was reached.');
+      return 'rejected';
+    }
+    if (this.eventTextLength + serialized.length > MAX_EVENT_TEXT) {
+      this.reject('the session event text limit was reached.');
+      return 'rejected';
+    }
+    this.events.set(eventId, { serialized });
+    this.eventTextLength += serialized.length;
+    return 'accepted';
+  }
+
   private rememberEvent(
     eventId: unknown,
     value: unknown,
-    kind: TrackedEvent['kind'],
+    kind: 'partial' | 'final' | 'failed',
     text: string,
     previous?: unknown
   ) {
@@ -135,6 +165,7 @@ export class LiveUtterances {
     const existing = this.events.get(eventId);
     if (existing) {
       if (
+        !('itemId' in existing) ||
         existing.itemId !== value ||
         existing.kind !== kind ||
         existing.text !== text ||
@@ -405,6 +436,8 @@ export class LiveUtterances {
 
   discard() {
     this.items = [];
+    this.events.clear();
+    this.eventTextLength = 0;
     this.reject('the workspace changed while this session was active.');
   }
 
@@ -416,6 +449,8 @@ export class LiveUtterances {
           .join('\n\n')
       : this.preview();
     this.items = [];
+    this.events.clear();
+    this.eventTextLength = 0;
     this.active = false;
     return text;
   }

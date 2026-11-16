@@ -416,6 +416,42 @@ describe('ordered live utterances', () => {
     expect(items.finish()).toBe('saved');
   });
 
+  it('shares bounded identities between registration payloads and transcription events', () => {
+    const items = new LiveUtterances();
+    items.update('B', 'final', 'second', 'event-B');
+    items.update('A', 'final', 'first', 'event-A');
+    expect(items.trackEvent('event-A', 'registration B after A')).toBe('rejected');
+    expect(items.error).toMatch(/event ID.*reused/);
+    expect(items.orderUncertain).toBe(true);
+    expect(items.finish()).toBe(
+      '[Live item; order unconfirmed]\nsecond\n\n[Live item; order unconfirmed]\nfirst'
+    );
+
+    const registrations = new LiveUtterances();
+    expect(registrations.trackEvent('registration', 'same')).toBe('accepted');
+    expect(registrations.trackEvent('registration', 'same')).toBe('duplicate');
+    expect(registrations.trackEvent('registration', 'changed')).toBe('rejected');
+    expect(registrations.error).toMatch(/event ID.*reused/);
+  });
+
+  it('includes registration identities in the session event and payload limits', () => {
+    const items = new LiveUtterances();
+    items.register('A', null);
+    items.update('A', 'partial', 'saved', 'transcription');
+    for (let index = 1; index < 4096; index++) {
+      expect(items.trackEvent(`registration-${index}`, '{}')).toBe('accepted');
+    }
+    expect(items.trackEvent('one-too-many', '{}')).toBe('rejected');
+    expect(items.error).toMatch(/event limit/);
+    expect(items.finish()).toBe('saved');
+
+    const payload = new LiveUtterances();
+    payload.update('A', 'partial', 'draft', undefined, null);
+    expect(payload.trackEvent('large', 'x'.repeat(1_000_001))).toBe('rejected');
+    expect(payload.error).toMatch(/event text limit/);
+    expect(payload.finish()).toBe('draft');
+  });
+
   it('stops on a pending-text limit without erasing the existing draft', () => {
     const items = new LiveUtterances();
     items.register('A', null);

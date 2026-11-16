@@ -1154,24 +1154,159 @@ describe('identified live items', () => {
     expect(await readDownload('TXT')).toBe('corrected\n');
   });
 
-  it('deduplicates transcription event IDs independently of registration events', async () => {
+  it('deduplicates distinct registration and transcription events in one identity space', async () => {
     render(<SttApp />);
     await startLive();
     emitEvent({
       type: 'input_audio_buffer.speech_started',
       item_id: 'A',
-      event_id: 'same',
+      event_id: 'registration',
       previous_item_id: null
     });
     emitEvent({
+      previous_item_id: null,
+      event_id: 'registration',
+      item_id: 'A',
+      type: 'input_audio_buffer.speech_started'
+    });
+    const delta = {
       type: 'conversation.item.input_audio_transcription.delta',
       item_id: 'A',
-      event_id: 'same',
+      event_id: 'transcription',
       delta: 'saved'
-    });
+    };
+    emitEvent(delta);
+    emitEvent(delta);
     expect(screen.getByLabelText('Transcript text')).toHaveValue('saved');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
+
+  it.each(['registration-first', 'transcription-first'] as const)(
+    'fences cross-kind event ID reuse when %s',
+    async (order) => {
+      render(<SttApp />);
+      await startLive();
+      emitEvent({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'A',
+        previous_item_id: null,
+        event_id: 'seed',
+        delta: 'saved'
+      });
+      const registration = {
+        type: 'input_audio_buffer.speech_started',
+        item_id: 'A',
+        event_id: 'same',
+        previous_item_id: null
+      };
+      const delta = {
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'A',
+        event_id: 'same',
+        delta: ' more'
+      };
+      emitEvent(order === 'registration-first' ? registration : delta);
+      emitEvent(order === 'registration-first' ? delta : registration);
+      expect(screen.getByRole('alert')).toHaveTextContent(/event ID.*reused/);
+      expect(await readDownload('TXT')).toBe(
+        order === 'registration-first' ? 'saved\n' : 'saved more\n'
+      );
+    }
+  );
+
+  it('does not use conflicting registration IDs to resolve provisional final order', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'B',
+      event_id: 'final-B',
+      transcript: 'second'
+    });
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'A',
+      event_id: 'final-A',
+      transcript: 'first'
+    });
+    emitEvent({
+      type: 'input_audio_buffer.committed',
+      item_id: 'B',
+      event_id: 'final-A',
+      previous_item_id: 'A'
+    });
+    emitEvent({
+      type: 'input_audio_buffer.committed',
+      item_id: 'A',
+      event_id: 'final-B',
+      previous_item_id: null
+    });
+    expect(screen.getByText(/event ID.*reused/)).toBeVisible();
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('second first');
+    expect(getExportButton('TXT')).toBeDisabled();
+    expect(getExportButton('JSON')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(await readDownload('TXT')).toBe(
+      '[Live item; order unconfirmed]\nsecond\n\n[Live item; order unconfirmed]\nfirst\n'
+    );
+  });
+
+  it.each([
+    { type: 'input_audio_buffer.speech_started', item_id: 'A', previous_item_id: null },
+    { type: 'input_audio_buffer.speech_stopped', item_id: 'A', previous_item_id: null },
+    { type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null },
+    {
+      type: 'conversation.item.created',
+      item: { id: 'A', content: [{ type: 'input_audio' }] },
+      previous_item_id: null
+    }
+  ])('fences changed registration payloads for $type', async (registration) => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'A',
+      event_id: 'draft',
+      previous_item_id: null,
+      delta: 'saved'
+    });
+    emitEvent({ ...registration, event_id: 'registration', audio_start_ms: 1 });
+    emitEvent({ ...registration, event_id: 'registration', audio_start_ms: 2 });
+    expect(screen.getByRole('alert')).toHaveTextContent(/event ID.*reused/);
+    expect(await readDownload('TXT')).toBe('saved\n');
+  });
+
+  it.each(['', ' ', 42, { invalid: true }])(
+    'fences malformed registration event IDs without resolving draft order (%s)',
+    async (eventId) => {
+      render(<SttApp />);
+      await startLive();
+      emitEvent({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'A',
+        event_id: 'accepted',
+        previous_item_id: null,
+        transcript: 'accepted'
+      });
+      emitEvent({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'B',
+        event_id: 'draft',
+        delta: 'draft'
+      });
+      emitEvent({
+        type: 'input_audio_buffer.committed',
+        item_id: 'B',
+        event_id: eventId,
+        previous_item_id: 'A'
+      });
+      expect(screen.getByText(/event ID was malformed/)).toBeVisible();
+      expect(screen.getByLabelText('Transcript text')).toHaveValue('accepted draft');
+      expect(getExportButton('TXT')).toBeDisabled();
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      expect(await readDownload('TXT')).toBe('accepted [Live item; order unconfirmed]\ndraft\n');
+    }
+  );
 
   it.each([
     {

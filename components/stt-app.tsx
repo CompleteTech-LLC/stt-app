@@ -201,6 +201,17 @@ const extractRealtimeText = (event: Record<string, unknown>) => {
   return null;
 };
 
+const serializeRealtimeEvent = (event: Record<string, unknown>) =>
+  JSON.stringify(event, (_key, value: unknown) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.entries(value).sort(([left], [right]) =>
+            left < right ? -1 : left > right ? 1 : 0
+          )
+        )
+      : value
+  ) ?? '';
+
 export function SttApp() {
   const [mode, setMode] = useState<Mode>('live');
   const [language, setLanguage] = useState('en');
@@ -224,7 +235,8 @@ export function SttApp() {
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
-  const turnPendingRef = useRef(false);
+  const turnPendingRef = useRef<string | null>(null);
+  const turnSequenceRef = useRef(0);
   const liveLanguageRef = useRef(language);
   const utterancesRef = useRef(new LiveUtterances(false));
   const liveSessionRef = useRef(0);
@@ -267,7 +279,7 @@ export function SttApp() {
       channel.onopen = null;
       channel.onclose = null;
     }
-    turnPendingRef.current = false;
+    turnPendingRef.current = null;
     setTurnPending(false);
     setChannelReady(false);
     const peer = peerConnectionRef.current;
@@ -571,13 +583,23 @@ export function SttApp() {
       channel.onopen = () => {
         if (ownsChannel()) setChannelReady(true);
       };
-      channel.onclose = () => {
-        if (ownsChannel()) {
-          setChannelReady(false);
-          turnPendingRef.current = false;
-          setTurnPending(false);
-        }
+      const handleChannelClose = () => {
+        if (!ownsChannel()) return;
+        const remaining = utterancesRef.current.finish();
+        if (remaining) applyFinalText(remaining);
+        setPartial('');
+        setOrderUncertain(false);
+        stopMedia();
+        setLiveError(
+          'Realtime data channel closed. Capture stopped; uncommitted audio and any pending transcription may be lost. Audio already sent cannot be retracted. Retry to start a new session.'
+        );
+        setLiveState('error');
       };
+      channel.onclose = handleChannelClose;
+      if (channel.readyState === 'closed') {
+        handleChannelClose();
+        return;
+      }
       if (channel.readyState === 'open') setChannelReady(true);
       channel.onmessage = (message) => {
         if (!ownsChannel()) return;
@@ -597,13 +619,6 @@ export function SttApp() {
               : undefined;
           const type = typeof parsed.type === 'string' ? parsed.type : '';
           if (!type) throw new Error('Malformed realtime event');
-          if (type === 'input_audio_buffer.committed' || type === 'error') {
-            if (type === 'error' && turnPendingRef.current) {
-              setLiveError('The audio turn was not accepted. Retry while connected.');
-            }
-            turnPendingRef.current = false;
-            setTurnPending(false);
-          }
           const content = Array.isArray(item?.content) ? item.content : [];
           const isCreated = type === 'conversation.item.created';
           const isAudioBufferEvent = [
@@ -614,6 +629,18 @@ export function SttApp() {
           const isTranscriptionEvent = type.startsWith(
             'conversation.item.input_audio_transcription.'
           );
+          const isTrackedEvent =
+            isCreated || isAudioBufferEvent || isTranscriptionEvent || type === 'error';
+          const eventIdentity = isTrackedEvent
+            ? tracker.trackEvent(
+                parsed.event_id,
+                parsed.event_id == null ? '' : serializeRealtimeEvent(parsed)
+              )
+            : 'untracked';
+          if (eventIdentity === 'duplicate' || eventIdentity === 'rejected') {
+            if (tracker.error) setTrackerNotice(tracker.error);
+            return;
+          }
           const hasTextFields = [
             'delta',
             'transcript',
@@ -723,7 +750,7 @@ export function SttApp() {
             ) {
               tracker.reject('a transcription failure event contained unexpected text.');
             } else {
-              committed = tracker.fail(parsed.item_id, parsed.previous_item_id, parsed.event_id);
+              committed = tracker.fail(parsed.item_id, parsed.previous_item_id);
               if (committed) applyFinalText(committed);
               if (!tracker.error) {
                 setTrackerNotice(
@@ -738,7 +765,7 @@ export function SttApp() {
                 parsed.item_id,
                 update.kind,
                 update.text,
-                parsed.event_id,
+                undefined,
                 parsed.previous_item_id
               );
               if (committed) applyFinalText(committed);
@@ -750,6 +777,29 @@ export function SttApp() {
               ((type.includes('transcription') || type.includes('transcript')) && hasTextFields)
             ) {
               tracker.reject('a transcription event type or text was unsupported or malformed.');
+            }
+          }
+          if (!tracker.error && turnPendingRef.current) {
+            if (type === 'input_audio_buffer.committed') {
+              if (eventIdentity === 'accepted') {
+                turnPendingRef.current = null;
+                setTurnPending(false);
+                setLiveError('');
+              } else {
+                setLiveError(
+                  'The turn acknowledgement had no event ID and cannot be verified. Stop and retry.'
+                );
+              }
+            } else if (
+              type === 'error' &&
+              parsed.error &&
+              typeof parsed.error === 'object' &&
+              !Array.isArray(parsed.error) &&
+              (parsed.error as Record<string, unknown>).event_id === turnPendingRef.current
+            ) {
+              turnPendingRef.current = null;
+              setTurnPending(false);
+              setLiveError('The audio turn was not accepted. Retry while connected.');
             }
           }
         } catch {
@@ -904,13 +954,22 @@ export function SttApp() {
 
   const finishTurn = () => {
     const channel = dataChannelRef.current;
-    if (!channel || channel.readyState !== 'open' || turnPendingRef.current) return;
+    if (
+      !channel ||
+      channel.readyState !== 'open' ||
+      turnPendingRef.current ||
+      utterancesRef.current.error
+    )
+      return;
+    const clientEventId = `turn-${liveSessionRef.current}-${++turnSequenceRef.current}`;
     try {
-      turnPendingRef.current = true;
+      setLiveError('');
+      turnPendingRef.current = clientEventId;
       setTurnPending(true);
-      channel.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+      channel.send(JSON.stringify({ type: 'input_audio_buffer.commit', event_id: clientEventId }));
     } catch {
-      turnPendingRef.current = false;
+      if (dataChannelRef.current !== channel || turnPendingRef.current !== clientEventId) return;
+      turnPendingRef.current = null;
       setTurnPending(false);
       setLiveError('The audio turn could not be submitted. Retry while connected.');
     }
@@ -1075,7 +1134,12 @@ export function SttApp() {
                 <button
                   type="button"
                   onClick={finishTurn}
-                  disabled={liveState !== 'live' || !channelReady || turnPending}
+                  disabled={
+                    liveState !== 'live' ||
+                    !channelReady ||
+                    turnPending ||
+                    trackerNotice.startsWith('Live transcription paused:')
+                  }
                 >
                   Finish turn
                 </button>

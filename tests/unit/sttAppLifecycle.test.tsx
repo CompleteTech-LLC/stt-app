@@ -83,6 +83,7 @@ function transcriptResponse(text: string): Response {
 
 class FakeChannel extends EventTarget {
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onclose: ((event: Event) => void) | null = null;
   readyState: RTCDataChannelState = 'open';
   send = vi.fn((value: string) => value);
   close = vi.fn();
@@ -90,6 +91,13 @@ class FakeChannel extends EventTarget {
   emit(message: Record<string, unknown>) {
     const event = new MessageEvent('message', { data: JSON.stringify(message) });
     this.onmessage?.(event);
+    this.dispatchEvent(event);
+  }
+
+  closeWithoutPeerChange() {
+    this.readyState = 'closed';
+    const event = new Event('close');
+    this.onclose?.(event);
     this.dispatchEvent(event);
   }
 }
@@ -242,13 +250,19 @@ describe('live capture resource ownership', () => {
     expect(oldChannel.send).not.toHaveBeenCalled();
     fireEvent.click(finish);
     expect(oldChannel.send).toHaveBeenCalledOnce();
-    expect(JSON.parse(oldChannel.send.mock.calls[0][0] as string)).toEqual({
-      type: 'input_audio_buffer.commit'
+    const firstTurn = JSON.parse(oldChannel.send.mock.calls[0][0] as string) as {
+      event_id: string;
+      type: string;
+    };
+    expect(firstTurn).toEqual({
+      type: 'input_audio_buffer.commit',
+      event_id: expect.any(String)
     });
     expect(finish).toBeDisabled();
     act(() =>
       oldChannel.emit({
         type: 'input_audio_buffer.committed',
+        event_id: 'first-ack',
         item_id: 'A',
         previous_item_id: null
       })
@@ -268,6 +282,290 @@ describe('live capture resource ownership', () => {
     expect(currentChannel.send).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Finish turn' }));
     expect(currentChannel.send).toHaveBeenCalledOnce();
+    const newTurn = JSON.parse(currentChannel.send.mock.calls[0][0] as string) as {
+      event_id: string;
+    };
+    expect(newTurn.event_id).not.toBe(firstTurn.event_id);
+    act(() =>
+      oldHandler?.(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            type: 'input_audio_buffer.committed',
+            event_id: 'old-ack',
+            item_id: 'old'
+          })
+        })
+      )
+    );
+    expect(screen.getByRole('button', { name: 'Finish turn' })).toBeDisabled();
+  });
+
+  it('does not let duplicate acknowledgements or unrelated errors release a later turn', async () => {
+    getUserMedia.mockResolvedValueOnce(makeStream().stream);
+    realtimeResponses.push(() => Promise.resolve(answerResponse()));
+    render(<SttApp />);
+    await beginLive();
+    const channel = peers[0].channel;
+    const finish = screen.getByRole('button', { name: 'Finish turn' });
+    fireEvent.click(finish);
+    const first = JSON.parse(channel.send.mock.calls[0][0] as string) as { event_id: string };
+    const firstAck = {
+      type: 'input_audio_buffer.committed',
+      event_id: 'ack-1',
+      item_id: 'A',
+      previous_item_id: null
+    };
+    act(() => channel.emit(firstAck));
+    expect(finish).toBeEnabled();
+
+    fireEvent.click(finish);
+    const second = JSON.parse(channel.send.mock.calls[1][0] as string) as { event_id: string };
+    expect(second.event_id).not.toBe(first.event_id);
+    act(() => {
+      channel.emit(firstAck);
+      channel.emit({
+        type: 'error',
+        event_id: 'unrelated-error',
+        error: { event_id: first.event_id, message: 'private synthetic detail' }
+      });
+      channel.emit({ type: 'error', event_id: 'uncorrelated-error', error: {} });
+    });
+    expect(finish).toBeDisabled();
+    expect(screen.queryByText(/private synthetic detail/)).not.toBeInTheDocument();
+
+    const matchingError = {
+      type: 'error',
+      event_id: 'matching-error',
+      error: { event_id: second.event_id, message: 'private matching detail' }
+    };
+    act(() => channel.emit(matchingError));
+    expect(finish).toBeEnabled();
+    expect(screen.getByText(/audio turn was not accepted/)).toBeVisible();
+    expect(screen.queryByText(/private matching detail/)).not.toBeInTheDocument();
+    fireEvent.click(finish);
+    const third = JSON.parse(channel.send.mock.calls[2][0] as string) as { event_id: string };
+    expect(third.event_id).not.toBe(second.event_id);
+    act(() => channel.emit(matchingError));
+    expect(finish).toBeDisabled();
+    act(() =>
+      channel.emit({
+        type: 'input_audio_buffer.committed',
+        event_id: 'ack-3',
+        item_id: 'B',
+        previous_item_id: 'A'
+      })
+    );
+    expect(finish).toBeEnabled();
+  });
+
+  it.each([undefined, null])(
+    'keeps a turn pending when an acknowledgement has an absent event ID (%s)',
+    async (eventId) => {
+      getUserMedia.mockResolvedValueOnce(makeStream().stream);
+      realtimeResponses.push(() => Promise.resolve(answerResponse()));
+      render(<SttApp />);
+      await beginLive();
+      const channel = peers[0].channel;
+      const finish = screen.getByRole('button', { name: 'Finish turn' });
+      fireEvent.click(finish);
+      act(() =>
+        channel.emit({
+          type: 'input_audio_buffer.committed',
+          event_id: eventId,
+          item_id: 'A',
+          previous_item_id: null
+        })
+      );
+      expect(finish).toBeDisabled();
+      expect(screen.getByText(/acknowledgement had no event ID/)).toBeVisible();
+      act(() =>
+        channel.emit({
+          type: 'input_audio_buffer.committed',
+          event_id: 'identified-ack',
+          item_id: 'A',
+          previous_item_id: null
+        })
+      );
+      expect(finish).toBeEnabled();
+      expect(screen.queryByText(/acknowledgement had no event ID/)).not.toBeInTheDocument();
+    }
+  );
+
+  it.each([
+    { event_id: 'missing-item' },
+    { event_id: ' ', item_id: 'A' },
+    { event_id: 'bad-predecessor', item_id: 'A', previous_item_id: -1 }
+  ])('keeps a turn pending on a malformed acknowledgement %#', async (acknowledgement) => {
+    getUserMedia.mockResolvedValueOnce(makeStream().stream);
+    realtimeResponses.push(() => Promise.resolve(answerResponse()));
+    render(<SttApp />);
+    await beginLive();
+    const channel = peers[0].channel;
+    act(() =>
+      channel.emit({
+        type: 'conversation.item.input_audio_transcription.delta',
+        event_id: 'draft',
+        item_id: 'A',
+        previous_item_id: null,
+        delta: 'saved'
+      })
+    );
+    const finish = screen.getByRole('button', { name: 'Finish turn' });
+    fireEvent.click(finish);
+    act(() => channel.emit({ type: 'input_audio_buffer.committed', ...acknowledgement }));
+    expect(finish).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/item ID|event ID|predecessor ID/);
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('saved');
+    expect(channel.send).toHaveBeenCalledOnce();
+  });
+
+  it('fences an error reusing an acknowledgement ID before releasing a turn', async () => {
+    getUserMedia.mockResolvedValueOnce(makeStream().stream);
+    realtimeResponses.push(() => Promise.resolve(answerResponse()));
+    render(<SttApp />);
+    await beginLive();
+    const channel = peers[0].channel;
+    const finish = screen.getByRole('button', { name: 'Finish turn' });
+    fireEvent.click(finish);
+    act(() =>
+      channel.emit({
+        type: 'input_audio_buffer.committed',
+        event_id: 'server-id',
+        item_id: 'A',
+        previous_item_id: null
+      })
+    );
+    fireEvent.click(finish);
+    const pending = JSON.parse(channel.send.mock.calls[1][0] as string) as { event_id: string };
+    act(() =>
+      channel.emit({ type: 'error', event_id: 'server-id', error: { event_id: pending.event_id } })
+    );
+    expect(finish).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/event ID.*reused/);
+    expect(channel.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers from a failed send without reusing its client event ID', async () => {
+    getUserMedia.mockResolvedValueOnce(makeStream().stream);
+    realtimeResponses.push(() => Promise.resolve(answerResponse()));
+    render(<SttApp />);
+    await beginLive();
+    const channel = peers[0].channel;
+    channel.send.mockImplementationOnce(() => {
+      throw new Error('private local detail');
+    });
+    const finish = screen.getByRole('button', { name: 'Finish turn' });
+    fireEvent.click(finish);
+    const failed = JSON.parse(channel.send.mock.calls[0][0] as string) as { event_id: string };
+    expect(finish).toBeEnabled();
+    expect(screen.getByText(/could not be submitted/)).toBeVisible();
+    fireEvent.click(finish);
+    const retry = JSON.parse(channel.send.mock.calls[1][0] as string) as { event_id: string };
+    expect(retry.event_id).not.toBe(failed.event_id);
+    act(() =>
+      channel.emit({ type: 'error', event_id: 'old-error', error: { event_id: failed.event_id } })
+    );
+    expect(finish).toBeDisabled();
+  });
+
+  it('stops only the owned capture on channel close and preserves uncertain text', async () => {
+    const oldMedia = makeStream();
+    const newMedia = makeStream();
+    getUserMedia.mockResolvedValueOnce(oldMedia.stream).mockResolvedValueOnce(newMedia.stream);
+    realtimeResponses.push(
+      () => Promise.resolve(answerResponse()),
+      () => Promise.resolve(answerResponse())
+    );
+    render(<SttApp />);
+    await beginLive();
+    const oldPeer = peers[0];
+    const oldClose = oldPeer.channel.onclose;
+    act(() => {
+      oldPeer.channel.emit({
+        type: 'conversation.item.input_audio_transcription.completed',
+        event_id: 'accepted-final',
+        item_id: 'A',
+        previous_item_id: null,
+        transcript: 'Accepted'
+      });
+      oldPeer.channel.emit({
+        type: 'conversation.item.input_audio_transcription.delta',
+        event_id: 'pending-delta',
+        item_id: 'B',
+        delta: 'Pending'
+      });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Finish turn' }));
+    expect(oldPeer.connectionState).toBe('connected');
+    act(() => oldPeer.channel.closeWithoutPeerChange());
+    expect(oldMedia.stop).toHaveBeenCalledOnce();
+    expect(oldPeer.close).toHaveBeenCalledOnce();
+    expect(screen.queryByText('Listening')).not.toBeInTheDocument();
+    expect(screen.getByText(/data channel closed.*Capture stopped/)).toBeVisible();
+    expect(
+      screen.getByText(/uncommitted audio and any pending transcription may be lost/)
+    ).toBeVisible();
+    expect(screen.getByLabelText('Transcript text')).toHaveValue(
+      'Accepted [Live item; order unconfirmed]\nPending'
+    );
+    expect(screen.getByRole('button', { name: 'Finish turn' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
+    expect(oldPeer.channel.send).toHaveBeenCalledOnce();
+    expect(
+      fetchMock.mock.calls.filter(([input]) => requestPath(input) === '/api/transcribe')
+    ).toHaveLength(0);
+
+    await beginLive('Retry');
+    const newPeer = peers[1];
+    fireEvent.click(screen.getByRole('button', { name: 'Finish turn' }));
+    act(() => oldClose?.(new Event('close')));
+    expect(screen.getByText('Listening')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Finish turn' })).toBeDisabled();
+    expect(newMedia.stop).not.toHaveBeenCalled();
+    expect(newPeer.close).not.toHaveBeenCalled();
+    act(() =>
+      newPeer.channel.emit({
+        type: 'input_audio_buffer.committed',
+        event_id: 'new-ack',
+        item_id: 'new-session-item',
+        previous_item_id: null
+      })
+    );
+    expect(screen.getByRole('button', { name: 'Finish turn' })).toBeEnabled();
+    emitTranscript(newPeer, 'new-session-item', 'New speech');
+    expect(screen.getByLabelText('Transcript text')).toHaveValue(
+      'Accepted [Live item; order unconfirmed]\nPending New speech'
+    );
+  });
+
+  it('retires a channel closed during pending setup without falling back', async () => {
+    const oldMedia = makeStream();
+    const newMedia = makeStream();
+    const setup = deferred(answerResponse());
+    getUserMedia.mockResolvedValueOnce(oldMedia.stream).mockResolvedValueOnce(newMedia.stream);
+    realtimeResponses.push(
+      () => setup.promise,
+      () => Promise.resolve(answerResponse())
+    );
+    render(<SttApp />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    const oldPeer = peers[0];
+    const setupSignal = fetchMock.mock.calls[0][1]?.signal as AbortSignal;
+    act(() => oldPeer.channel.closeWithoutPeerChange());
+    expect(setupSignal.aborted).toBe(true);
+    expect(oldMedia.stop).toHaveBeenCalledOnce();
+    expect(oldPeer.close).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
+    await beginLive('Retry');
+    await resolveDeferred(setup, answerResponse());
+    expect(screen.getByText('Listening')).toBeVisible();
+    expect(newMedia.stop).not.toHaveBeenCalled();
+    expect(peers[1].close).not.toHaveBeenCalled();
+    expect(recorders).toHaveLength(0);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => requestPath(input) === '/api/transcribe')
+    ).toHaveLength(0);
   });
 
   it.each(['clear', 'edit', 'new live', 'new upload', 'unmount'] as const)(

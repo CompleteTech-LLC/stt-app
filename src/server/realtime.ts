@@ -1,32 +1,13 @@
 import 'server-only';
 
 import { getServerConfig, requireOpenAIKey } from '@/src/lib/config';
-import { AppError } from '@/src/lib/errors';
+import { AppError, getUpstreamStatus } from '@/src/lib/errors';
 
 type RealtimeInput = {
   language: string;
   delay: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   safetyIdentifier?: string;
   signal?: AbortSignal;
-};
-
-const parseOpenAIError = (body: string): { message?: string; code?: string } => {
-  try {
-    const parsed = JSON.parse(body) as {
-      error?: {
-        message?: string;
-        code?: string;
-        type?: string;
-      };
-    };
-
-    return {
-      message: parsed.error?.message,
-      code: parsed.error?.code || parsed.error?.type
-    };
-  } catch {
-    return {};
-  }
 };
 
 export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: string }) => {
@@ -72,18 +53,17 @@ export const createRealtimeCallAnswer = async (input: RealtimeInput & { sdp: str
     const body = await response.text();
 
     if (!response.ok) {
-      const upstream = parseOpenAIError(body);
+      const upstreamStatus = getUpstreamStatus(response.status);
       throw new AppError(
         'UPSTREAM_ERROR',
-        response.status === 401
+        upstreamStatus === 401
           ? 'OpenAI rejected the server API key.'
-          : upstream.message
-            ? `Could not establish realtime transcription session. OpenAI returned HTTP ${response.status}: ${upstream.message}`
-            : `Could not establish realtime transcription session. OpenAI returned HTTP ${response.status}. Verify the OpenAI project has active billing and access to realtime transcription.`,
-        response.status === 401 ? 503 : 502,
-        response.status >= 500,
-        response.status,
-        upstream.code
+          : upstreamStatus === undefined
+            ? 'Could not establish realtime transcription session. Verify the OpenAI project has active billing and access to realtime transcription.'
+            : `Could not establish realtime transcription session. OpenAI returned HTTP ${upstreamStatus}. Verify the OpenAI project has active billing and access to realtime transcription.`,
+        upstreamStatus === 401 ? 503 : 502,
+        upstreamStatus !== undefined && upstreamStatus >= 500,
+        upstreamStatus
       );
     }
 

@@ -24,26 +24,10 @@ export class AppError extends Error {
   }
 }
 
-const getString = (value: unknown) => (typeof value === 'string' ? value : undefined);
-
-const getOpenAIErrorDetails = (error: Error) => {
-  const candidate = error as {
-    status?: number;
-    code?: string;
-    type?: string;
-    error?: {
-      code?: string;
-      type?: string;
-      message?: string;
-    };
-  };
-
-  return {
-    status: candidate.status,
-    code: candidate.code || candidate.type || candidate.error?.code || candidate.error?.type,
-    message: getString(candidate.error?.message) || getString(error.message)
-  };
-};
+export const getUpstreamStatus = (status: unknown): number | undefined =>
+  typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+    ? status
+    : undefined;
 
 export const toAppError = (error: unknown): AppError => {
   if (error instanceof AppError) return error;
@@ -53,9 +37,9 @@ export const toAppError = (error: unknown): AppError => {
   }
 
   if (error instanceof Error) {
-    const upstream = getOpenAIErrorDetails(error);
+    const upstreamStatus = getUpstreamStatus((error as { status?: unknown }).status);
     if (
-      upstream.status !== 401 &&
+      upstreamStatus !== 401 &&
       (error.name === 'AbortError' ||
         error.name === 'TimeoutError' ||
         error.name === 'APIConnectionTimeoutError' ||
@@ -78,19 +62,15 @@ export const toAppError = (error: unknown): AppError => {
       );
     }
 
-    const maybeStatus = upstream.status;
-    if (maybeStatus && maybeStatus >= 400) {
+    if (upstreamStatus !== undefined && upstreamStatus >= 400) {
       return new AppError(
         'UPSTREAM_ERROR',
-        maybeStatus === 401
+        upstreamStatus === 401
           ? 'OpenAI rejected the server API key.'
-          : upstream.message
-            ? `OpenAI transcription service returned HTTP ${maybeStatus}: ${upstream.message}`
-            : `OpenAI transcription service returned HTTP ${maybeStatus}.`,
-        maybeStatus === 401 ? 503 : 502,
-        maybeStatus >= 500,
-        maybeStatus,
-        maybeStatus === 401 ? undefined : upstream.code
+          : `OpenAI transcription service returned HTTP ${upstreamStatus}. Check the OpenAI project configuration and access, or retry later.`,
+        upstreamStatus === 401 ? 503 : 502,
+        upstreamStatus >= 500,
+        upstreamStatus
       );
     }
   }

@@ -15,29 +15,48 @@ Status: early prototype (version 0.1.0, not published as a package). It needs yo
 
 ### Transcript exports
 
-TXT and JSON export the text currently shown in the workspace, including live drafts and edits.
-SRT and VTT are available only when the transcript has original timestamp segments. Editing the
-text or adding live speech invalidates that alignment, so subtitle exports are disabled and JSON
-exports an empty `segments` list. A new file transcription can supply fresh timestamps. Realtime
-events do not supply segment timestamps, so live transcripts support TXT/JSON only.
+TXT and JSON export the text currently shown in the workspace, including live drafts and edits,
+when its order is established. SRT and VTT require valid original timestamps for every segment.
+Editing the text or adding live speech invalidates that alignment, so subtitle exports are disabled
+and JSON exports an empty `segments` list. The configured file models use JSON transcription and
+do not promise timestamp segments; synthetic timestamp fixtures are not evidence of provider
+availability. Realtime events do not supply segment timestamps. Starting live capture alone does
+not relabel an existing upload. Combined text uses `model: "mixed"` when its sources differ, and
+omits the language when the sources do not share a known language.
 
 Live transcription uses the documented transcription `item_id` to associate deltas, final
 transcripts and failures. An `event_id` identifies an event, not an utterance. Predecessor IDs
-available before commitment order overlapping items as direct predecessor chains; an unresolved
-predecessor can delay later finals. An explicit null predecessor marks the first item; contradictory
-or duplicate first-item metadata fences the session. A failed predecessor is terminal: available
-partial text is retained, successors can continue, and the workspace shows a warning. Stop flushes
-the available text. Conflicting terminal events or ordering metadata that contradicts committed
-order fence the session; they cannot retroactively repair already committed text.
+order overlapping items as direct predecessor chains. An explicit null predecessor marks the first
+item; an item with an unknown predecessor is provisional and is not irreversibly committed. Late
+metadata can reorder provisional items. While their order is unconfirmed the preview is provisional
+and Copy/TXT/JSON are disabled. Stop retains available text, marking each unresolved item
+`[Live item; order unconfirmed]` so the exported sequence does not claim to be chronological.
+Contradictory or duplicate first-item metadata, conflicting terminal events, and conflicting
+audio/non-audio identities fence the session. A failed predecessor is terminal: available partial
+text is retained, successors can continue, and the workspace shows a warning.
+
+Realtime turn detection is disabled for the configured model. Press **Finish turn** after speaking
+to send an explicit `input_audio_buffer.commit`; listening continues. Wait for transcription and
+ordering metadata before pressing Stop. Stop releases capture immediately and does not wait for a
+commit or final response; any available unresolved text is retained with the labels described above.
+No periodic commits are sent. These controls have synthetic coverage only, not live provider or
+browser-media qualification.
 
 Clearing, editing, or replacing the workspace during a live session fences **all subsequent events
 from that session**, including events for unknown predecessors. Missing or conflicting item IDs,
 malformed tracked events, unexpected transcript fields, contradictory ordering, or resource limits
 also pause acceptance of further events rather than guessing their identity or order. A visible
 message asks you to Stop and Start a new session; the microphone is not automatically stopped by
-this transcript fence. Existing displayed/exported text is preserved, except for the workspace
-change you explicitly made. Text in rejected events is not captured and may need to be repeated in
-the new session.
+this realtime transcript fence. During local fallback recording, a workspace edit, clear, or
+successful replacement upload instead stops capture and explicitly discards that recording; it
+will not be transcribed. A successful fallback transcription appends to existing text and any
+retained live draft instead of replacing them. Retry while fallback recording discards that recording
+and reports the disposition. If a recorder stops unexpectedly, capture is released immediately and
+its audio stays in this tab until you choose **Transcribe recording** or **Discard recording**; it
+is not uploaded automatically. If recording reports an error, only chunks already received are
+retained for this choice and they may be incomplete. An older upload cannot replace a later edit,
+clear, new upload, or live session. Text in rejected events is not captured and may need to be
+repeated in the new session.
 
 For one session, the tracker retains at most 1,024 item IDs (including referenced predecessors),
 4,096 event IDs, and 1,000,000 UTF-16 code units each of pending transcript text, resolved item

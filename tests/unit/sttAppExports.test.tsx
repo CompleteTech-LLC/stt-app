@@ -49,6 +49,7 @@ async function uploadTranscript() {
 }
 
 async function startLive() {
+  automaticItemId = 0;
   vi.mocked(fetch).mockResolvedValueOnce(new Response('synthetic answer'));
   fireEvent.click(screen.getByRole('tab', { name: 'Live Mic' }));
   fireEvent.click(screen.getByRole('button', { name: 'Start' }));
@@ -75,12 +76,14 @@ function stubMediaRecorder() {
 
 function emitTranscript(type: 'delta' | 'completed', text: string, itemId?: string) {
   const id = itemId ?? `automatic-item-${automaticItemId}`;
+  const previous = automaticItemId === 0 ? null : `automatic-item-${automaticItemId - 1}`;
   if (itemId === undefined && type === 'completed') automaticItemId++;
   act(() => {
     channel.onmessage?.({
       data: JSON.stringify({
         type: `conversation.item.input_audio_transcription.${type}`,
         item_id: id,
+        ...(itemId === undefined ? { previous_item_id: previous } : {}),
         ...(type === 'delta' ? { delta: text } : { transcript: text })
       })
     });
@@ -164,6 +167,8 @@ describe('transcript export controls', () => {
     expect(JSON.parse(await readDownload('JSON'))).toEqual({
       ...uploadedTranscript,
       text: 'Corrected transcript.',
+      language: undefined,
+      model: 'edited',
       segments: []
     });
     expect(getExportButton('SRT')).toBeDisabled();
@@ -247,6 +252,72 @@ describe('transcript export controls', () => {
     expect(getExportButton('SRT')).toBeDisabled();
   });
 
+  it('preserves upload provenance until speech and marks mixed sources afterwards', async () => {
+    render(<SttApp />);
+    await uploadTranscript();
+    fireEvent.change(screen.getByLabelText('Language hint'), { target: { value: 'es' } });
+    await startLive();
+    expect(JSON.parse(await readDownload('JSON'))).toEqual(uploadedTranscript);
+    emitTranscript('delta', 'Nuevo');
+    const mixed = JSON.parse(await readDownload('JSON'));
+    expect(mixed).toMatchObject({
+      text: 'Original transcript. Nuevo',
+      model: 'mixed',
+      segments: []
+    });
+    expect(mixed.language).toBeUndefined();
+  });
+
+  it('preserves edited indentation through draft, final, Stop, TXT, and JSON', async () => {
+    render(<SttApp />);
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: '  Indented\n  note\n' }
+    });
+    await startLive();
+    emitTranscript('delta', 'draft');
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('  Indented\n  note\ndraft');
+    emitTranscript('completed', 'speech');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(await readDownload('TXT')).toBe('  Indented\n  note\nspeech\n');
+    expect(JSON.parse(await readDownload('JSON')).text).toBe('  Indented\n  note\nspeech');
+  });
+
+  it('appends fallback speech to an upload without retaining its alignment', async () => {
+    stubMediaRecorder();
+    render(<SttApp />);
+    await uploadTranscript();
+    vi.mocked(fetch)
+      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            transcript: {
+              text: 'Fallback speech',
+              model: 'gpt-4o-mini-transcribe',
+              language: 'en',
+              segments: []
+            }
+          })
+        )
+      );
+    fireEvent.click(screen.getByRole('tab', { name: 'Live Mic' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+    await screen.findByText('Recording locally');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await waitFor(() =>
+      expect(screen.getByLabelText('Transcript text')).toHaveValue(
+        'Original transcript. Fallback speech'
+      )
+    );
+    expect(await readDownload('TXT')).toBe('Original transcript. Fallback speech\n');
+    expect(JSON.parse(await readDownload('JSON'))).toMatchObject({
+      text: 'Original transcript. Fallback speech',
+      segments: []
+    });
+    expect(getExportButton('SRT')).toBeDisabled();
+    expect(getExportButton('VTT')).toBeDisabled();
+  });
+
   it('replaces a pending live draft when a file transcription arrives', async () => {
     render(<SttApp />);
     await startLive();
@@ -314,6 +385,7 @@ describe('transcript export controls', () => {
         data: JSON.stringify({
           type: 'conversation.item.input_audio_transcription.delta',
           item_id: 'queued-item',
+          previous_item_id: null,
           delta: 'Last draft'
         })
       });
@@ -357,21 +429,73 @@ describe('cancelled microphone startup', () => {
 });
 
 describe('identified live items', () => {
+  it('reconciles late order and explicitly labels unresolved items on Stop', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitTranscript('completed', 'second', 'B');
+    emitTranscript('completed', 'first', 'A');
+    expect(screen.getByText(/order is unconfirmed/i)).toBeInTheDocument();
+    expect(getExportButton('TXT')).toBeDisabled();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('first second');
+    expect(getExportButton('JSON')).toBeDisabled();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    expect(await readDownload('TXT')).toBe('first second\n');
+    expect(JSON.parse(await readDownload('JSON')).text).toBe('first second');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await startLive();
+    emitTranscript('completed', 'fourth', 'D');
+    emitTranscript('completed', 'third', 'C');
+    expect(getExportButton('TXT')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    const text =
+      'first second [Live item; order unconfirmed]\nfourth\n\n[Live item; order unconfirmed]\nthird';
+    expect(screen.getByLabelText('Transcript text')).toHaveValue(text);
+    expect(await readDownload('TXT')).toBe(`${text}\n`);
+    expect(JSON.parse(await readDownload('JSON')).text).toBe(text);
+  });
   it.each([
     { description: 'empty', content: [] },
     { description: 'absent', content: undefined },
     { description: 'unknown', content: [{ type: 'unknown' }] },
-    { description: 'contradictory text', content: [{ type: 'input_text' }] },
     { description: 'mixed text and unknown', content: [{ type: 'input_text' }, {}] }
   ])('keeps known audio when created content is $description', async ({ content }) => {
     render(<SttApp />);
     await startLive();
-    emitEvent({ type: 'input_audio_buffer.speech_started', item_id: 'A' });
+    emitEvent({ type: 'input_audio_buffer.speech_started', item_id: 'A', previous_item_id: null });
     emitTranscript('delta', 'spoken draft', 'A');
     emitEvent({ type: 'conversation.item.created', item: { id: 'A', content } });
     expect(screen.getByLabelText('Transcript text')).toHaveValue('spoken draft');
     emitTranscript('completed', 'spoken final', 'A');
     expect(await readDownload('TXT')).toBe('spoken final\n');
+  });
+
+  it('fences non-audio identity after audio, including after completion', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    emitTranscript('completed', 'accepted audio', 'A');
+    emitEvent({
+      type: 'conversation.item.created',
+      item: { id: 'A', content: [{ type: 'input_text' }] }
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(/non-audio.*conflicts/);
+    emitTranscript('completed', 'untrusted', 'B');
+    expect(await readDownload('TXT')).toBe('accepted audio\n');
+  });
+
+  it('fences a single item claiming both audio and non-audio content', async () => {
+    render(<SttApp />);
+    await startLive();
+    emitEvent({
+      type: 'conversation.item.created',
+      previous_item_id: null,
+      item: { id: 'A', content: [{ type: 'input_audio' }, { type: 'input_text' }] }
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(/conflicting audio and non-audio/);
+    emitTranscript('completed', 'not accepted', 'A');
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('');
   });
 
   it('registers available predecessors even when created content is absent', async () => {
@@ -383,6 +507,7 @@ describe('identified live items', () => {
       item: { id: 'B' }
     });
     emitTranscript('completed', 'second', 'B');
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
     emitTranscript('completed', 'first', 'A');
     expect(await readDownload('TXT')).toBe('first second\n');
   });
@@ -390,6 +515,8 @@ describe('identified live items', () => {
   it('keeps known direct predecessors adjacent when other drafts overlap', async () => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'X', previous_item_id: 'B' });
     emitTranscript('delta', 'first', 'A');
     emitTranscript('delta', 'other', 'X');
     emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
@@ -406,6 +533,8 @@ describe('identified live items', () => {
     emitTranscript('delta', 'second', 'B');
     emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
     emitTranscript('delta', 'first', 'A');
+    expect(getExportButton('TXT')).toBeDisabled();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
     expect(await readDownload('TXT')).toBe('first second\n');
     emitTranscript('completed', 'second', 'B');
     emitTranscript('completed', 'first', 'A');
@@ -416,10 +545,12 @@ describe('identified live items', () => {
   it('fences first-item metadata that contradicts committed text', async () => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
     emitTranscript('completed', 'later', 'A');
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
     emitTranscript('delta', 'first', 'B');
     emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: null });
-    expect(screen.getByRole('alert')).toHaveTextContent(/first-item metadata.*committed/);
+    expect(screen.getByRole('alert')).toHaveTextContent(/multiple items.*first/);
     expect(await readDownload('TXT')).toBe('later first\n');
     emitTranscript('completed', 'changed', 'B');
     expect(await readDownload('TXT')).toBe('later first\n');
@@ -428,6 +559,8 @@ describe('identified live items', () => {
   it('preserves the displayed order when an oversized update also carries predecessor metadata', async () => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
     emitTranscript('delta', 'first', 'A');
     emitTranscript('delta', 'second', 'B');
     emitEvent({
@@ -445,6 +578,7 @@ describe('identified live items', () => {
   it('surfaces conflicting final or failure events without replacing accepted text', async () => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
     emitTranscript('delta', 'first', 'A');
     emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
     emitEvent({
@@ -464,6 +598,7 @@ describe('identified live items', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     expect(await readDownload('TXT')).toBe('first second\n');
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'C', previous_item_id: null });
     emitTranscript('completed', 'accepted', 'C');
     emitEvent({ type: 'conversation.item.input_audio_transcription.failed', item_id: 'C' });
     expect(screen.getByRole('alert')).toHaveTextContent(/terminal item.*conflicting/);
@@ -473,6 +608,7 @@ describe('identified live items', () => {
   it('releases successors after a failed predecessor and visibly reports the failure', async () => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
     emitTranscript('delta', 'partial first', 'A');
     emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
     emitTranscript('completed', 'second', 'B');
@@ -498,7 +634,11 @@ describe('identified live items', () => {
     await startLive();
     emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
     emitTranscript('completed', 'second', 'B');
-    emitEvent({ type: 'conversation.item.input_audio_transcription.failed', item_id: 'A' });
+    emitEvent({
+      type: 'conversation.item.input_audio_transcription.failed',
+      item_id: 'A',
+      previous_item_id: null
+    });
     expect(screen.getByRole('alert')).toHaveTextContent(/failed transcription/);
     expect(await readDownload('TXT')).toBe('second\n');
     emitEvent({
@@ -540,7 +680,7 @@ describe('identified live items', () => {
     vi.mocked(fetch).mockResolvedValueOnce(new Response('synthetic answer'));
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByText('Listening');
-    expect(await readDownload('TXT')).toBe('buffered second\n');
+    expect(await readDownload('TXT')).toBe('[Live item; order unconfirmed]\nbuffered second\n');
   });
 
   it('does not report an active-session fence after startup fails', async () => {
@@ -621,6 +761,7 @@ describe('identified live items', () => {
   it('refuses identity-free and mixed-ID text instead of correlating by event ID', async () => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
     emitTranscript('delta', 'identified draft', 'A');
     emitEvent({
       type: 'conversation.item.input_audio_transcription.completed',
@@ -634,6 +775,7 @@ describe('identified live items', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     expect(await readDownload('TXT')).toBe('identified draft\n');
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: null });
     emitTranscript('completed', 'new session', 'B');
     expect(await readDownload('TXT')).toBe('identified draft new session\n');
   });
@@ -726,6 +868,7 @@ describe('identified live items', () => {
   ])('refuses malformed or conflicting identity event %# visibly', async (event) => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'saved', previous_item_id: null });
     emitTranscript('delta', 'saved', 'saved');
     emitEvent(event);
     emitTranscript('completed', 'not accepted', 'saved');
@@ -738,6 +881,7 @@ describe('identified live items', () => {
     async (data) => {
       render(<SttApp />);
       await startLive();
+      emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
       emitTranscript('delta', 'saved', 'A');
       act(() => channel.onmessage?.({ data }));
       expect(screen.getByRole('alert')).toHaveTextContent(/malformed or too large/);
@@ -748,6 +892,7 @@ describe('identified live items', () => {
   it('deduplicates event IDs without treating them as item identity', async () => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
     const event = {
       type: 'conversation.item.input_audio_transcription.delta',
       item_id: 'A',
@@ -765,7 +910,12 @@ describe('identified live items', () => {
   it('deduplicates transcription event IDs independently of registration events', async () => {
     render(<SttApp />);
     await startLive();
-    emitEvent({ type: 'input_audio_buffer.speech_started', item_id: 'A', event_id: 'same' });
+    emitEvent({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'A',
+      event_id: 'same',
+      previous_item_id: null
+    });
     emitEvent({
       type: 'conversation.item.input_audio_transcription.delta',
       item_id: 'A',
@@ -795,6 +945,7 @@ describe('identified live items', () => {
   ])('rejects event ID reuse with missing or conflicting identity %#', async (event) => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
     emitEvent({
       type: 'conversation.item.input_audio_transcription.delta',
       item_id: 'A',
@@ -857,6 +1008,7 @@ describe('identified live items', () => {
       if (action === 'replace') fireEvent.click(screen.getByRole('tab', { name: 'Live Mic' }));
       fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
       await startLive();
+      emitEvent({ type: 'input_audio_buffer.committed', item_id: 'C', previous_item_id: null });
       emitTranscript('completed', 'new', 'C');
       expect(await readDownload('TXT')).toBe(
         (action === 'clear'
@@ -871,6 +1023,8 @@ describe('identified live items', () => {
   it('stops with overlapping drafts in order and ignores later completions', async () => {
     render(<SttApp />);
     await startLive();
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    emitEvent({ type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
     emitTranscript('delta', 'first draft', 'A');
     emitTranscript('delta', 'second draft', 'B');
     emitTranscript('completed', 'second final', 'B');

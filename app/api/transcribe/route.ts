@@ -21,6 +21,7 @@ export async function POST(request: NextRequest) {
   if (denied) return denied;
 
   try {
+    request.signal.throwIfAborted();
     const config = getServerConfig();
     assertRateLimit(request, 'transcribe');
     validateRequestSize(request.headers.get('content-length'), config.limits.maxUploadBytes);
@@ -44,6 +45,7 @@ export async function POST(request: NextRequest) {
       prompt: form.get('prompt')?.toString() || undefined
     });
 
+    request.signal.throwIfAborted();
     logger.info('transcription_started', {
       size: metadata.size,
       type: metadata.type,
@@ -55,7 +57,8 @@ export async function POST(request: NextRequest) {
       file,
       language: fields.language,
       model: fields.model,
-      prompt: fields.prompt
+      prompt: fields.prompt,
+      signal: request.signal
     });
 
     logger.info('transcription_completed', {

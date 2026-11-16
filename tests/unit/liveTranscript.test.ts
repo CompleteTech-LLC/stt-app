@@ -13,6 +13,7 @@ describe('live transcript helpers', () => {
   it('previews live draft after existing finalized transcript text', () => {
     expect(joinTranscriptText('First sentence.', 'Next')).toBe('First sentence. Next');
     expect(joinTranscriptText('First sentence. ', 'Next')).toBe('First sentence. Next');
+    expect(joinTranscriptText('  Indented\nline\n', 'speech')).toBe('  Indented\nline\nspeech');
   });
 });
 
@@ -21,7 +22,7 @@ describe('ordered live utterances', () => {
     const items = new LiveUtterances();
     items.register('B');
     items.register('C', 'B');
-    items.register('A');
+    items.register('A', null);
     items.register('B', 'A');
     items.update('A', 'partial', 'first');
     items.update('B', 'partial', 'second');
@@ -34,7 +35,7 @@ describe('ordered live utterances', () => {
 
   it('retains a non-audio item’s predecessor until the chain resolves', () => {
     const items = new LiveUtterances();
-    items.register('A');
+    items.register('A', null);
     items.skip('X', 'A');
     items.register('B', 'X');
     expect(items.update('B', 'final', 'second')).toBe('');
@@ -56,7 +57,7 @@ describe('ordered live utterances', () => {
     const items = new LiveUtterances();
     items.register('B', 'A');
     expect(items.update('B', 'final', 'second')).toBe('');
-    items.register('A');
+    items.register('A', null);
     expect(items.update('A', 'final', 'first')).toBe('first second');
   });
 
@@ -64,11 +65,12 @@ describe('ordered live utterances', () => {
     const items = new LiveUtterances();
     items.register('B', 'A');
     expect(items.update('B', 'final', 'speech')).toBe('');
-    expect(items.skip('A')).toBe('speech');
+    expect(items.skip('A', null)).toBe('speech');
   });
 
   it('deduplicates identified events but preserves equal unidentified deltas', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
     items.update('A', 'partial', 'ha', 'event-1');
     items.update('A', 'partial', 'ha', 'event-1');
     items.update('A', 'partial', 'ha', 'event-2');
@@ -93,33 +95,30 @@ describe('ordered live utterances', () => {
     }
   );
 
-  it('reports late predecessor metadata that contradicts committed order', () => {
+  it('retains unordered finals until late predecessor metadata establishes their order', () => {
     const items = new LiveUtterances();
-    expect(items.update('B', 'final', 'second')).toBe('second');
-    expect(items.update('A', 'final', 'first')).toBe('first');
+    expect(items.update('B', 'final', 'second')).toBe('');
+    expect(items.update('A', 'final', 'first')).toBe('');
+    expect(items.orderUncertain).toBe(true);
     items.register('B', 'A');
-    expect(items.error).toMatch(/predecessor metadata.*committed/);
-    expect(items.update('C', 'final', 'not accepted')).toBe('');
+    expect(items.preview()).toBe('first second');
+    expect(items.register('A', null)).toBe('first second');
+    expect(items.orderUncertain).toBe(false);
+    expect(items.error).toBe('');
 
-    const ordered = new LiveUtterances();
-    ordered.update('A', 'final', 'first');
-    ordered.update('B', 'final', 'second');
-    ordered.register('B', 'A');
-    expect(ordered.error).toBe('');
-    expect(ordered.update('C', 'final', 'third')).toBe('third');
-
-    const intervening = new LiveUtterances();
-    intervening.update('A', 'final', 'first');
-    intervening.update('X', 'final', 'intervening');
-    intervening.update('B', 'final', 'second');
-    intervening.register('B', 'A');
-    expect(intervening.error).toMatch(/predecessor metadata.*committed/);
+    const unknown = new LiveUtterances();
+    unknown.update('B', 'final', 'second');
+    unknown.update('A', 'final', 'first');
+    expect(unknown.finish()).toBe(
+      '[Live item; order unconfirmed]\nsecond\n\n[Live item; order unconfirmed]\nfirst'
+    );
   });
 
   it('orders an explicit first item before pending items with unknown predecessors', () => {
     const items = new LiveUtterances();
     items.update('B', 'partial', 'second');
     items.register('A', null);
+    items.register('B', 'A');
     items.update('A', 'partial', 'first');
     expect(items.preview()).toBe('first second');
     expect(items.update('B', 'final', 'second')).toBe('');
@@ -129,17 +128,17 @@ describe('ordered live utterances', () => {
 
   it('fences contradictory or duplicate explicit first-item metadata', () => {
     const late = new LiveUtterances();
-    expect(late.update('A', 'final', 'later')).toBe('later');
+    expect(late.update('A', 'final', 'later', undefined, null)).toBe('later');
     late.update('B', 'partial', 'first');
     late.register('B', null);
-    expect(late.error).toMatch(/first-item metadata.*committed/);
-    expect(late.finish()).toBe('first');
+    expect(late.error).toMatch(/multiple items.*first/);
+    expect(late.finish()).toContain('first');
 
     const committed = new LiveUtterances();
-    committed.update('A', 'final', 'later');
+    committed.update('A', 'final', 'later', undefined, null);
     committed.update('B', 'final', 'first');
     committed.register('B', null);
-    expect(committed.error).toMatch(/first-item metadata.*committed/);
+    expect(committed.error).toMatch(/multiple items.*first/);
 
     const duplicate = new LiveUtterances();
     duplicate.register('A', null);
@@ -169,7 +168,7 @@ describe('ordered live utterances', () => {
     const items = new LiveUtterances();
     items.register('B', 'A');
     items.update('B', 'partial', 'second draft');
-    items.register('A');
+    items.register('A', null);
     items.update('A', 'partial', 'first draft');
     expect(items.preview()).toBe('first draft second draft');
     expect(items.update('B', 'final', 'second final')).toBe('');
@@ -178,6 +177,8 @@ describe('ordered live utterances', () => {
 
   it('does not append a repeated completion after an item has been committed', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
+    items.register('B', 'A');
     expect(items.update('A', 'final', 'first')).toBe('first');
     expect(items.update('A', 'final', 'first')).toBe('');
     expect(items.update('B', 'final', 'second')).toBe('second');
@@ -185,6 +186,7 @@ describe('ordered live utterances', () => {
 
   it('fences late conflicting deltas for committed and empty items', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
     expect(items.update('A', 'final', '')).toBe('');
     items.register('A');
     expect(items.update('A', 'partial', 'late')).toBe('');
@@ -192,11 +194,13 @@ describe('ordered live utterances', () => {
     expect(items.update('A', 'final', 'late')).toBe('');
     expect(items.error).toMatch(/terminal item.*conflicting/);
     expect(items.update('B', 'final', 'next')).toBe('');
-    expect(new LiveUtterances().update('B', 'final', 'next')).toBe('next');
+    expect(new LiveUtterances().update('B', 'final', 'next', undefined, null)).toBe('next');
   });
 
   it('keeps direct predecessor chains adjacent without interposing another draft', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
+    items.register('X', 'B');
     items.update('A', 'partial', 'first');
     items.update('X', 'partial', 'other');
     items.register('B', 'A');
@@ -217,8 +221,8 @@ describe('ordered live utterances', () => {
     expect(siblings.preview()).toBe('saved');
 
     const late = new LiveUtterances();
-    late.update('A', 'final', 'first');
-    late.update('X', 'final', 'other');
+    late.update('A', 'final', 'first', undefined, null);
+    late.update('X', 'final', 'other', undefined, 'A');
     late.register('B', 'A');
     expect(late.error).toMatch(/committed item order/);
     expect(late.update('B', 'final', 'second')).toBe('');
@@ -226,6 +230,7 @@ describe('ordered live utterances', () => {
 
   it('fences conflicting terminal events but deduplicates exact final text', () => {
     const pending = new LiveUtterances();
+    pending.register('A', null);
     pending.update('A', 'partial', 'first');
     pending.register('B', 'A');
     pending.update('B', 'final', 'second', 'event-1');
@@ -234,6 +239,7 @@ describe('ordered live utterances', () => {
     expect(pending.finish()).toBe('first second');
 
     const resolved = new LiveUtterances();
+    resolved.register('A', null);
     expect(resolved.update('A', 'final', 'first', 'event-1')).toBe('first');
     expect(resolved.update('A', 'final', 'first', 'event-2')).toBe('');
     expect(resolved.error).toBe('');
@@ -248,8 +254,16 @@ describe('ordered live utterances', () => {
 
   it('fences the session instead of evicting resolved IDs at the item limit', () => {
     const items = new LiveUtterances();
-    items.update('old', 'final', 'old');
-    for (let i = 0; i < 1023; i++) items.update(`item-${i}`, 'final', 'text');
+    items.update('old', 'final', 'old', undefined, null);
+    for (let index = 0; index < 1023; index++) {
+      items.update(
+        `item-${index}`,
+        'final',
+        'text',
+        undefined,
+        index ? `item-${index - 1}` : 'old'
+      );
+    }
     items.register('discarded');
     expect(items.error).toMatch(/item limit/);
     items.discard();
@@ -276,12 +290,12 @@ describe('ordered live utterances', () => {
     items.discard();
     expect(items.update('B', 'final', 'new')).toBe('');
     expect(items.update('A', 'final', 'old final')).toBe('');
-    expect(new LiveUtterances().update('B', 'final', 'new')).toBe('new');
+    expect(new LiveUtterances().update('B', 'final', 'new', undefined, null)).toBe('new');
   });
 
   it('keeps overlapping drafts in item order, including a later final arriving first', () => {
     const items = new LiveUtterances();
-    items.register('A');
+    items.register('A', null);
     items.register('B', 'A');
     items.update('A', 'partial', 'first');
     items.update('B', 'partial', 'second draft');
@@ -293,6 +307,8 @@ describe('ordered live utterances', () => {
 
   it('retains a later draft when an earlier final arrives and stop flushes it', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
+    items.register('B', 'A');
     items.update('A', 'partial', 'first');
     items.update('B', 'partial', 'second');
     expect(items.update('A', 'final', 'first final')).toBe('first final');
@@ -322,6 +338,7 @@ describe('ordered live utterances', () => {
 
   it('preserves identified drafts when an anonymous completion creates ambiguity', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
     items.update('A', 'partial', 'old');
     expect(items.update(undefined, 'final', 'new', 'different-event')).toBe('');
     expect(items.error).toMatch(/item ID/);
@@ -356,27 +373,38 @@ describe('ordered live utterances', () => {
     expect(items.preview()).toBe('');
   });
 
-  it('does not resolve a known audio item as non-audio', () => {
+  it('fences contradictory non-audio identity for pending and resolved audio', () => {
     const items = new LiveUtterances();
     items.register('A', undefined, true);
     items.update('A', 'partial', 'spoken');
     items.skip('A');
     expect(items.preview()).toBe('spoken');
-    expect(items.update('A', 'final', 'spoken final')).toBe('spoken final');
+    expect(items.error).toMatch(/non-audio.*conflicts/);
+    expect(items.update('A', 'final', 'spoken final')).toBe('');
+    const resolved = new LiveUtterances();
+    resolved.update('A', 'final', 'spoken', undefined, null);
+    resolved.skip('A');
+    expect(resolved.error).toMatch(/non-audio.*conflicts/);
+    const reverse = new LiveUtterances();
+    reverse.skip('A', null);
+    reverse.update('A', 'final', 'spoken');
+    expect(reverse.error).toMatch(/conflicting/);
   });
 
   it('resolves a failed predecessor and keeps its partial text before successors', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
     items.update('A', 'partial', 'incomplete');
     items.register('B', 'A');
     expect(items.update('B', 'final', 'second')).toBe('');
     expect(items.fail('A', undefined, 'failure')).toBe('incomplete second');
     expect(items.fail('A', undefined, 'failure')).toBe('');
-    expect(items.update('C', 'final', 'third')).toBe('third');
+    expect(items.update('C', 'final', 'third', undefined, 'B')).toBe('third');
   });
 
   it('stops on an event limit without erasing pending text', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
     items.update('A', 'partial', 'saved', 'event-0');
     for (let index = 1; index < 4096; index++) items.update('A', 'partial', '', `event-${index}`);
     expect(items.update('A', 'partial', 'refused', 'event-4096')).toBe('');
@@ -386,6 +414,7 @@ describe('ordered live utterances', () => {
 
   it('stops on a pending-text limit without erasing the existing draft', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
     const draft = 'x'.repeat(1_000_000);
     items.update('A', 'partial', draft);
     items.update('A', 'partial', 'overflow');
@@ -395,6 +424,8 @@ describe('ordered live utterances', () => {
 
   it('preflights the pending-text limit before applying predecessor metadata', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
+    items.register('B', 'A');
     items.update('A', 'partial', 'first');
     items.update('B', 'partial', 'second');
     items.update('A', 'partial', 'x'.repeat(1_000_000), undefined, 'B');
@@ -405,6 +436,7 @@ describe('ordered live utterances', () => {
 
   it('bounds retained event text without erasing pending text', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
     const draft = 'x'.repeat(1_000_000);
     items.update('A', 'partial', draft, 'first');
     items.update('A', 'final', 'final', 'second');
@@ -414,6 +446,8 @@ describe('ordered live utterances', () => {
 
   it('bounds retained resolved text while preserving the pending item', () => {
     const items = new LiveUtterances();
+    items.register('A', null);
+    items.register('B', 'A');
     const first = 'x'.repeat(1_000_000);
     expect(items.update('A', 'final', first)).toBe(first);
     items.update('B', 'partial', 'second');
@@ -428,7 +462,7 @@ describe('ordered live utterances', () => {
     cycle.update('B', 'partial', 'saved');
     cycle.register('A', 'B');
     expect(cycle.error).toMatch(/cycle/);
-    expect(cycle.finish()).toBe('saved');
+    expect(cycle.finish()).toBe('[Live item; order unconfirmed]\nsaved');
 
     const conflict = new LiveUtterances();
     conflict.register('B', 'A');

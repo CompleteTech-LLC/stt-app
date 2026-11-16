@@ -42,6 +42,7 @@ type LiveState =
   | 'connecting'
   | 'live'
   | 'fallback-recording'
+  | 'fallback-ready'
   | 'fallback-transcribing'
   | 'stopped'
   | 'error';
@@ -78,6 +79,33 @@ const emptyTranscript: TranscriptDocument = {
 
 const acceptedAttribute = [...acceptedMimeTypes, ...acceptedExtensions].join(',');
 
+const appendDocumentText = (
+  current: TranscriptDocument,
+  text: string,
+  model: string | undefined,
+  language: string | undefined
+): TranscriptDocument => {
+  if (!text) return current;
+  const hasExistingText = current.text.length > 0;
+  return {
+    ...current,
+    text: joinTranscriptText(current.text, text),
+    segments: [],
+    model: hasExistingText && current.model !== model ? 'mixed' : model,
+    language: hasExistingText && current.language !== language ? undefined : language,
+    createdAt: current.createdAt || new Date().toISOString()
+  };
+};
+
+const stopRecorder = (recorder: MediaRecorder) => {
+  try {
+    if (recorder.state !== 'inactive') recorder.stop();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const liveStatusCopy: Record<LiveState, { label: string; detail: string }> = {
   idle: {
     label: 'Ready',
@@ -98,6 +126,10 @@ const liveStatusCopy: Record<LiveState, { label: string; detail: string }> = {
   'fallback-recording': {
     label: 'Recording locally',
     detail: 'Realtime is unavailable. Audio will be transcribed after Stop.'
+  },
+  'fallback-ready': {
+    label: 'Recording interrupted',
+    detail: 'Capture stopped. Choose whether to transcribe or discard the retained recording.'
   },
   'fallback-transcribing': {
     label: 'Transcribing recording',
@@ -179,34 +211,34 @@ export function SttApp() {
   const [liveError, setLiveError] = useState('');
   const [trackerNotice, setTrackerNotice] = useState('');
   const [partial, setPartial] = useState('');
+  const [orderUncertain, setOrderUncertain] = useState(false);
+  const [channelReady, setChannelReady] = useState(false);
+  const [turnPending, setTurnPending] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptDocument>(emptyTranscript);
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const turnPendingRef = useRef(false);
+  const liveLanguageRef = useRef(language);
   const utterancesRef = useRef(new LiveUtterances(false));
   const liveSessionRef = useRef(0);
   const realtimeRequestRef = useRef<AbortController | null>(null);
   const fallbackRequestRef = useRef<AbortController | null>(null);
-
-  const discardLiveDraft = useCallback(() => {
-    fallbackRequestRef.current?.abort();
-    setLiveState((current) => (current === 'fallback-transcribing' ? 'stopped' : current));
-    const tracker = utterancesRef.current;
-    tracker.discard();
-    setPartial('');
-    if (tracker.error) setTrackerNotice(tracker.error);
-  }, []);
+  const fallbackStopRequestedRef = useRef(false);
+  const pendingFallbackRef = useRef<(() => void) | null>(null);
+  const uploadRequestRef = useRef<AbortController | null>(null);
 
   const transcriptText = transcript.text;
   const displayedTranscriptText = joinTranscriptText(transcriptText, partial);
-  const exportDocument: TranscriptDocument = {
-    ...transcript,
-    text: displayedTranscriptText,
-    // A live draft has no alignment with any previously uploaded segments.
-    segments: partial ? [] : transcript.segments
-  };
-  const canExportTimed = hasTimestamps(exportDocument);
+  const exportDocument = appendDocumentText(
+    transcript,
+    partial,
+    sttModels.realtime,
+    liveLanguageRef.current
+  );
+  const canExportTimed = !orderUncertain && hasTimestamps(exportDocument);
   const liveStatus = liveStatusCopy[liveState];
 
   const fileHelp = useMemo(
@@ -217,48 +249,104 @@ export function SttApp() {
 
   const applyFinalText = useCallback(
     (text: string) => {
-      setTranscript((current) => ({
-        ...current,
-        text: `${current.text}${current.text && !current.text.endsWith(' ') ? ' ' : ''}${text}`.trimStart(),
-        segments: [],
-        language,
-        model: sttModels.realtime,
-        createdAt: current.createdAt || new Date().toISOString()
-      }));
+      setTranscript((current) => appendDocumentText(current, text, sttModels.realtime, language));
     },
     [language]
   );
+
+  const retirePeer = useCallback(() => {
+    const channel = dataChannelRef.current;
+    dataChannelRef.current = null;
+    if (channel) {
+      channel.onmessage = null;
+      channel.onopen = null;
+      channel.onclose = null;
+    }
+    turnPendingRef.current = false;
+    setTurnPending(false);
+    setChannelReady(false);
+    const peer = peerConnectionRef.current;
+    peerConnectionRef.current = null;
+    if (peer) {
+      peer.onconnectionstatechange = null;
+      peer.close();
+    }
+  }, []);
 
   const stopMedia = useCallback(() => {
     liveSessionRef.current += 1;
     realtimeRequestRef.current?.abort();
     realtimeRequestRef.current = null;
-    peerConnectionRef.current?.close();
-    peerConnectionRef.current = null;
+    retirePeer();
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+  }, [retirePeer]);
+
+  const cancelUpload = useCallback(() => {
+    const request = uploadRequestRef.current;
+    uploadRequestRef.current = null;
+    if (request) {
+      request.abort();
+      setUploadState('idle');
+    }
   }, []);
+
+  const discardLiveDraft = useCallback(() => {
+    const fallback = fallbackRequestRef.current;
+    fallbackRequestRef.current = null;
+    fallbackStopRequestedRef.current = false;
+    pendingFallbackRef.current = null;
+    fallback?.abort();
+    if (fallback) {
+      const recorder = recorderRef.current;
+      recorderRef.current = null;
+      if (recorder) {
+        recorder.ondataavailable = null;
+        recorder.onstop = null;
+        recorder.onerror = null;
+        stopRecorder(recorder);
+      }
+      stopMedia();
+      setLiveState('stopped');
+    }
+    const tracker = utterancesRef.current;
+    tracker.discard();
+    setPartial('');
+    setOrderUncertain(false);
+    if (fallback) {
+      setTrackerNotice(
+        'The local recording was discarded because the workspace changed; it will not be transcribed.'
+      );
+    } else if (tracker.error) {
+      setTrackerNotice(tracker.error);
+    }
+  }, [stopMedia]);
 
   useEffect(() => {
     return () => {
+      uploadRequestRef.current?.abort();
+      uploadRequestRef.current = null;
       fallbackRequestRef.current?.abort();
       fallbackRequestRef.current = null;
+      fallbackStopRequestedRef.current = false;
+      pendingFallbackRef.current = null;
       const recorder = recorderRef.current;
       recorderRef.current = null;
       if (recorder) {
         // Unmount releases capture without uploading an abandoned recording.
         recorder.ondataavailable = null;
         recorder.onstop = null;
-        if (recorder.state !== 'inactive') recorder.stop();
+        recorder.onerror = null;
+        stopRecorder(recorder);
       }
       stopMedia();
     };
   }, [stopMedia]);
 
   const transcribeFallbackRecording = useCallback(
-    async (blob: Blob, signal: AbortSignal) => {
-      const fallbackFile = new File([blob], `live-recording-${Date.now()}.webm`, {
-        type: blob.type || 'audio/webm'
+    async (blob: Blob, extension: string, signal: AbortSignal) => {
+      const fallbackFile = new File([blob], `live-recording-${Date.now()}.${extension}`, {
+        type: blob.type
       });
       const body = new FormData();
       body.set('file', fallbackFile);
@@ -274,33 +362,87 @@ export function SttApp() {
   );
 
   const startFallbackRecorder = useCallback(
-    (stream: MediaStream, reason: string) => {
+    (stream: MediaStream, session: number, reason: string) => {
       const request = new AbortController();
       fallbackRequestRef.current = request;
+      fallbackStopRequestedRef.current = false;
+      pendingFallbackRef.current = null;
       const chunks: Blob[] = [];
       const fallbackTracker = utterancesRef.current;
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      const formats = [
+        { mimeType: 'audio/webm', extension: 'webm' },
+        { mimeType: 'audio/ogg', extension: 'ogg' },
+        { mimeType: 'audio/mp4', extension: 'mp4' }
+      ];
+      const format = formats.find(
+        (candidate) =>
+          typeof MediaRecorder.isTypeSupported !== 'function' ||
+          MediaRecorder.isTypeSupported(candidate.mimeType)
+      );
+      if (!format) throw new Error('No supported local recording format is available.');
+      const recorder = new MediaRecorder(stream, { mimeType: format.mimeType });
       const isCurrent = () => fallbackRequestRef.current === request && !request.signal.aborted;
+      const releaseOwnedMedia = () => {
+        if (recorderRef.current === recorder) recorderRef.current = null;
+        if (session === liveSessionRef.current && streamRef.current === stream) stopMedia();
+      };
+      let stopped = false;
       recorder.ondataavailable = (event) => {
         if (isCurrent() && event.data.size > 0) chunks.push(event.data);
       };
-      recorder.onstop = async () => {
+      recorder.onerror = () => {
+        if (!isCurrent() || stopped) return;
+        stopped = true;
+        recorder.ondataavailable = null;
+        recorder.onstop = null;
+        recorder.onerror = null;
+        releaseOwnedMedia();
+        stopRecorder(recorder);
+        pendingFallbackRef.current = () => void transcribe();
+        setLiveError(
+          'Recording failed. Audio received so far may be incomplete; choose whether to transcribe or discard it.'
+        );
+        setLiveState('fallback-ready');
+      };
+      const transcribe = async () => {
         if (!isCurrent()) return;
+        pendingFallbackRef.current = null;
+        setLiveError('');
         try {
           setLiveState('fallback-transcribing');
-          const blob = new Blob(chunks, { type: 'audio/webm' });
-          const document = await transcribeFallbackRecording(blob, request.signal);
+          const blob = new Blob(chunks, { type: format.mimeType });
+          const document = await transcribeFallbackRecording(
+            blob,
+            format.extension,
+            request.signal
+          );
           if (!isCurrent()) return;
-          setTranscript(document);
-          if (utterancesRef.current === fallbackTracker) fallbackTracker.finish();
+          const remaining =
+            utterancesRef.current === fallbackTracker ? fallbackTracker.finish() : '';
+          setTranscript((current) => {
+            const withPending = appendDocumentText(
+              current,
+              remaining,
+              sttModels.realtime,
+              language
+            );
+            return appendDocumentText(
+              withPending,
+              document.text,
+              document.model,
+              document.language
+            );
+          });
           setPartial('');
+          setOrderUncertain(false);
           setLiveState('stopped');
         } catch (error) {
           if (!isCurrent()) return;
           if (utterancesRef.current === fallbackTracker) {
             const remaining = fallbackTracker.finish();
-            if (remaining.trim()) applyFinalText(remaining);
+            if (remaining) applyFinalText(remaining);
             setPartial('');
+            setOrderUncertain(false);
           }
           setLiveError(error instanceof Error ? error.message : 'Fallback transcription failed.');
           setLiveState('error');
@@ -309,32 +451,60 @@ export function SttApp() {
           if (fallbackRequestRef.current === request) fallbackRequestRef.current = null;
         }
       };
+      recorder.onstop = () => {
+        if (!isCurrent() || stopped) return;
+        stopped = true;
+        const requested = fallbackStopRequestedRef.current;
+        fallbackStopRequestedRef.current = false;
+        releaseOwnedMedia();
+        if (requested) {
+          void transcribe();
+        } else {
+          pendingFallbackRef.current = () => void transcribe();
+          setLiveError(
+            'Recording stopped unexpectedly. Its audio remains in this tab until you choose what to do.'
+          );
+          setLiveState('fallback-ready');
+        }
+      };
       recorderRef.current = recorder;
       recorder.start(1_000);
+      if (!isCurrent() || stopped) return;
       setLiveError(`${reason} Recording locally in this tab and transcribing after Stop.`);
       setLiveState('fallback-recording');
     },
-    [applyFinalText, transcribeFallbackRecording]
+    [applyFinalText, language, stopMedia, transcribeFallbackRecording]
   );
 
   const startLive = useCallback(async () => {
+    cancelUpload();
+    const discardedRecording = Boolean(
+      fallbackRequestRef.current && (recorderRef.current || pendingFallbackRef.current)
+    );
     fallbackRequestRef.current?.abort();
     fallbackRequestRef.current = null;
+    fallbackStopRequestedRef.current = false;
+    pendingFallbackRef.current = null;
     const oldRecorder = recorderRef.current;
     recorderRef.current = null;
     if (oldRecorder) {
       oldRecorder.ondataavailable = null;
       oldRecorder.onstop = null;
-      if (oldRecorder.state !== 'inactive') oldRecorder.stop();
+      oldRecorder.onerror = null;
+      stopRecorder(oldRecorder);
     }
     const remaining = utterancesRef.current.finish();
-    if (remaining.trim()) applyFinalText(remaining);
+    if (remaining) applyFinalText(remaining);
     stopMedia();
     const session = ++liveSessionRef.current;
+    liveLanguageRef.current = language;
     setLiveError('');
     utterancesRef.current = new LiveUtterances();
-    setTrackerNotice('');
+    setTrackerNotice(
+      discardedRecording ? 'The previous local recording was discarded on Retry.' : ''
+    );
     setPartial('');
+    setOrderUncertain(false);
     setLiveState('requesting-mic');
 
     try {
@@ -350,12 +520,13 @@ export function SttApp() {
       peerConnectionRef.current = pc;
 
       pc.onconnectionstatechange = () => {
-        if (session !== liveSessionRef.current) return;
+        if (session !== liveSessionRef.current || peerConnectionRef.current !== pc) return;
         if (pc.connectionState === 'connected') setLiveState('live');
         if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
           const remaining = utterancesRef.current.finish();
-          if (remaining.trim()) applyFinalText(remaining);
+          if (remaining) applyFinalText(remaining);
           setPartial('');
+          setOrderUncertain(false);
           stopMedia();
           setLiveError('Realtime connection was interrupted. Stop and retry.');
           setLiveState('error');
@@ -363,8 +534,24 @@ export function SttApp() {
       };
 
       const channel = pc.createDataChannel('oai-events');
+      dataChannelRef.current = channel;
+      const ownsChannel = () =>
+        session === liveSessionRef.current &&
+        peerConnectionRef.current === pc &&
+        dataChannelRef.current === channel;
+      channel.onopen = () => {
+        if (ownsChannel()) setChannelReady(true);
+      };
+      channel.onclose = () => {
+        if (ownsChannel()) {
+          setChannelReady(false);
+          turnPendingRef.current = false;
+          setTurnPending(false);
+        }
+      };
+      if (channel.readyState === 'open') setChannelReady(true);
       channel.onmessage = (message) => {
-        if (session !== liveSessionRef.current) return;
+        if (!ownsChannel()) return;
         const tracker = utterancesRef.current;
         try {
           if (typeof message.data !== 'string' || message.data.length > 1_100_000) {
@@ -381,6 +568,13 @@ export function SttApp() {
               : undefined;
           const type = typeof parsed.type === 'string' ? parsed.type : '';
           if (!type) throw new Error('Malformed realtime event');
+          if (type === 'input_audio_buffer.committed' || type === 'error') {
+            if (type === 'error' && turnPendingRef.current) {
+              setLiveError('The audio turn was not accepted. Retry while connected.');
+            }
+            turnPendingRef.current = false;
+            setTurnPending(false);
+          }
           const content = Array.isArray(item?.content) ? item.content : [];
           const isCreated = type === 'conversation.item.created';
           const isAudioBufferEvent = [
@@ -471,9 +665,21 @@ export function SttApp() {
                     String((part as Record<string, unknown>).type)
                   )
               );
-            committed = isNonAudio
-              ? tracker.skip(item?.id, parsed.previous_item_id)
-              : tracker.register(item?.id, parsed.previous_item_id, isAudio);
+            const hasNonAudio = content.some(
+              (part: unknown) =>
+                part &&
+                typeof part === 'object' &&
+                ['input_text', 'text', 'output_text'].includes(
+                  String((part as Record<string, unknown>).type)
+                )
+            );
+            if (isAudio && hasNonAudio) {
+              tracker.reject('an item contains conflicting audio and non-audio identity.');
+            } else {
+              committed = isNonAudio
+                ? tracker.skip(item?.id, parsed.previous_item_id)
+                : tracker.register(item?.id, parsed.previous_item_id, isAudio);
+            }
           } else if (isAudioBufferEvent) {
             committed = tracker.register(parsed.item_id, parsed.previous_item_id, true);
           }
@@ -522,6 +728,7 @@ export function SttApp() {
         }
         if (tracker.error) setTrackerNotice(tracker.error);
         setPartial(tracker.preview());
+        setOrderUncertain(tracker.orderUncertain);
       };
 
       stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
@@ -553,12 +760,6 @@ export function SttApp() {
       if (session !== liveSessionRef.current) return;
       await pc.setRemoteDescription({ type: 'answer', sdp });
       if (session !== liveSessionRef.current) return;
-      setTranscript((current) => ({
-        ...current,
-        language,
-        model: sttModels.realtime,
-        createdAt: current.createdAt || new Date().toISOString()
-      }));
     } catch (error) {
       if (session !== liveSessionRef.current) return;
       const message =
@@ -568,38 +769,105 @@ export function SttApp() {
         typeof MediaRecorder !== 'undefined' &&
         shouldAttemptLocalRecordingFallback(error)
       ) {
-        startFallbackRecorder(streamRef.current, message);
-        return;
+        retirePeer();
+        try {
+          startFallbackRecorder(streamRef.current, session, message);
+          return;
+        } catch (fallbackError) {
+          fallbackRequestRef.current?.abort();
+          fallbackRequestRef.current = null;
+          const recorder = recorderRef.current;
+          recorderRef.current = null;
+          if (recorder) {
+            recorder.ondataavailable = null;
+            recorder.onstop = null;
+            recorder.onerror = null;
+            stopRecorder(recorder);
+          }
+          const remaining = utterancesRef.current.finish();
+          if (remaining) applyFinalText(remaining);
+          setPartial('');
+          setOrderUncertain(false);
+          stopMedia();
+          setLiveError(
+            fallbackError instanceof Error
+              ? fallbackError.message
+              : 'Local recording could not start.'
+          );
+          setLiveState('error');
+          return;
+        }
       }
       setLiveError(
         `${message} Check OpenAI billing/model access and restart the app after updating server-side secrets.`
       );
       setLiveState('error');
       const remaining = utterancesRef.current.finish();
-      if (remaining.trim()) applyFinalText(remaining);
+      if (remaining) applyFinalText(remaining);
       setPartial('');
+      setOrderUncertain(false);
       stopMedia();
     }
-  }, [applyFinalText, language, startFallbackRecorder, stopMedia]);
+  }, [applyFinalText, cancelUpload, language, retirePeer, startFallbackRecorder, stopMedia]);
 
   const stopLive = useCallback(() => {
-    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+    if (recorderRef.current) {
       const recorder = recorderRef.current;
       recorderRef.current = null;
+      fallbackStopRequestedRef.current = true;
       stopMedia();
       setLiveState(
         fallbackRequestRef.current?.signal.aborted ? 'stopped' : 'fallback-transcribing'
       );
-      recorder.stop();
+      if (!stopRecorder(recorder)) {
+        fallbackRequestRef.current?.abort();
+        fallbackRequestRef.current = null;
+        fallbackStopRequestedRef.current = false;
+        recorder.onstop = null;
+        const remaining = utterancesRef.current.finish();
+        if (remaining) applyFinalText(remaining);
+        setPartial('');
+        setOrderUncertain(false);
+        setLiveError('Local recording could not stop and was discarded. Retry to start again.');
+        setLiveState('error');
+      }
       return;
     }
 
     const remaining = utterancesRef.current.finish();
-    if (remaining.trim()) applyFinalText(remaining);
+    if (remaining) applyFinalText(remaining);
     stopMedia();
     setPartial('');
+    setOrderUncertain(false);
     setLiveState('stopped');
   }, [applyFinalText, stopMedia]);
+
+  const discardPendingRecording = () => {
+    if (!pendingFallbackRef.current) return;
+    pendingFallbackRef.current = null;
+    fallbackRequestRef.current?.abort();
+    fallbackRequestRef.current = null;
+    const remaining = utterancesRef.current.finish();
+    if (remaining) applyFinalText(remaining);
+    setPartial('');
+    setOrderUncertain(false);
+    setLiveError('The retained local recording was discarded without transcription.');
+    setLiveState('stopped');
+  };
+
+  const finishTurn = () => {
+    const channel = dataChannelRef.current;
+    if (!channel || channel.readyState !== 'open' || turnPendingRef.current) return;
+    try {
+      turnPendingRef.current = true;
+      setTurnPending(true);
+      channel.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+    } catch {
+      turnPendingRef.current = false;
+      setTurnPending(false);
+      setLiveError('The audio turn could not be submitted. Retry while connected.');
+    }
+  };
 
   const validateClientFile = (candidate: File) => {
     if (candidate.size > appLimits.maxUploadBytes) {
@@ -622,6 +890,10 @@ export function SttApp() {
       return;
     }
 
+    cancelUpload();
+    const request = new AbortController();
+    uploadRequestRef.current = request;
+    const isCurrent = () => uploadRequestRef.current === request && !request.signal.aborted;
     try {
       setUploadState('validating');
       setUploadError('');
@@ -634,20 +906,29 @@ export function SttApp() {
       if (prompt.trim()) body.set('prompt', prompt.trim());
 
       setUploadState('uploading');
-      const response = await fetch('/api/transcribe', { method: 'POST', body });
+      const response = await fetch('/api/transcribe', {
+        method: 'POST',
+        body,
+        signal: request.signal
+      });
       if (!response.ok) throw await readApiFailure(response);
 
       const data = (await response.json()) as { transcript: TranscriptDocument };
-      setTranscript(data.transcript);
+      if (!isCurrent()) return;
       discardLiveDraft();
+      setTranscript(data.transcript);
       setUploadState('done');
     } catch (error) {
+      if (!isCurrent()) return;
       setUploadError(error instanceof Error ? error.message : 'Upload transcription failed.');
       setUploadState('error');
+    } finally {
+      if (uploadRequestRef.current === request) uploadRequestRef.current = null;
     }
   };
 
   const clearWorkspace = () => {
+    cancelUpload();
     setTranscript(emptyTranscript);
     discardLiveDraft();
     setUploadError('');
@@ -729,6 +1010,7 @@ export function SttApp() {
                     liveState === 'connecting' ||
                     liveState === 'live' ||
                     liveState === 'fallback-recording' ||
+                    liveState === 'fallback-ready' ||
                     liveState === 'fallback-transcribing'
                   }
                 >
@@ -738,6 +1020,13 @@ export function SttApp() {
                     <Mic size={18} />
                   )}
                   {['requesting-mic', 'connecting'].includes(liveState) ? 'Starting' : 'Start'}
+                </button>
+                <button
+                  type="button"
+                  onClick={finishTurn}
+                  disabled={liveState !== 'live' || !channelReady || turnPending}
+                >
+                  Finish turn
                 </button>
                 <button
                   type="button"
@@ -765,6 +1054,20 @@ export function SttApp() {
                   Retry
                 </button>
               </div>
+              {liveState === 'fallback-ready' ? (
+                <div className="button-row">
+                  <button type="button" onClick={() => pendingFallbackRef.current?.()}>
+                    Transcribe recording
+                  </button>
+                  <button type="button" onClick={discardPendingRecording}>
+                    Discard recording
+                  </button>
+                </div>
+              ) : null}
+              <p className="state-detail">
+                Finish turn submits the current audio for transcription while listening continues.
+                Wait for its result before Stop; Stop releases capture immediately.
+              </p>
               {liveError ? <p className="error">{liveError}</p> : null}
             </div>
           ) : (
@@ -776,7 +1079,10 @@ export function SttApp() {
                 <input
                   type="file"
                   accept={acceptedAttribute}
-                  onChange={(event) => setFile(event.target.files?.[0] || null)}
+                  onChange={(event) => {
+                    cancelUpload();
+                    setFile(event.target.files?.[0] || null);
+                  }}
                 />
               </label>
 
@@ -840,7 +1146,7 @@ export function SttApp() {
                 title="Copy transcript"
                 aria-label="Copy transcript"
                 onClick={() => navigator.clipboard.writeText(displayedTranscriptText)}
-                disabled={!displayedTranscriptText}
+                disabled={!displayedTranscriptText || orderUncertain}
               >
                 <Clipboard size={18} aria-hidden />
               </button>
@@ -856,9 +1162,12 @@ export function SttApp() {
             value={displayedTranscriptText}
             placeholder="Transcript text appears here. You can edit it before copying or exporting."
             onChange={(event) => {
+              cancelUpload();
               setTranscript((current) => ({
                 ...current,
                 text: event.target.value,
+                language: undefined,
+                model: 'edited',
                 // Whole-document edits cannot be aligned to the source segments.
                 segments: []
               }));
@@ -870,12 +1179,18 @@ export function SttApp() {
               {trackerNotice}
             </p>
           ) : null}
+          {orderUncertain ? (
+            <p className="error" role="alert">
+              Live item order is unconfirmed. The preview is provisional; TXT/JSON are unavailable
+              until order is known or Stop preserves the items with explicit uncertainty labels.
+            </p>
+          ) : null}
 
           <div className="export-row" aria-label="Export transcript">
             <button
               type="button"
               onClick={() => download('transcript.txt', exportTxt(exportDocument), 'text/plain')}
-              disabled={!displayedTranscriptText}
+              disabled={!displayedTranscriptText || orderUncertain}
             >
               <Download size={17} aria-hidden />
               TXT
@@ -885,7 +1200,7 @@ export function SttApp() {
               onClick={() =>
                 download('transcript.json', exportJson(exportDocument), 'application/json')
               }
-              disabled={!displayedTranscriptText}
+              disabled={!displayedTranscriptText || orderUncertain}
             >
               <Download size={17} aria-hidden />
               JSON

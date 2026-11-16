@@ -1,6 +1,6 @@
 export const joinTranscriptText = (finalText: string, liveDraft: string) => {
   if (!liveDraft) return finalText;
-  return `${finalText}${finalText && !finalText.endsWith(' ') ? ' ' : ''}${liveDraft}`.trimStart();
+  return `${finalText}${finalText && !/\s$/.test(finalText) ? ' ' : ''}${liveDraft}`;
 };
 
 export const appendRealtimeDelta = (currentDraft: string, delta: string) =>
@@ -161,7 +161,8 @@ export class LiveUtterances {
     let committed = '';
     while (
       this.items[0]?.final &&
-      (!this.items[0].previous || this.resolved.has(this.items[0].previous))
+      this.items[0].previousKnown &&
+      this.items[0].previous === this.lastResolvedId
     ) {
       const pending = this.items[0];
       if (pending.previous && pending.previous !== this.lastResolvedId) {
@@ -313,6 +314,12 @@ export class LiveUtterances {
 
   skip(value: unknown, previous?: unknown) {
     return this.transact(() => {
+      const existing = this.items.find((entry) => entry.id === value);
+      const resolved = typeof value === 'string' ? this.resolved.get(value) : undefined;
+      if (existing?.audio || (resolved && resolved.terminal !== 'non-audio')) {
+        this.reject('a non-audio item conflicts with an item identified as audio.');
+        return '';
+      }
       const committed = this.registerItem(value, previous);
       if (this.halted || typeof value !== 'string') return committed;
       const item = this.items.find((entry) => entry.id === value);
@@ -387,13 +394,27 @@ export class LiveUtterances {
     return this.items.reduce((text, item) => joinTranscriptText(text, item.text), '');
   }
 
+  get orderUncertain() {
+    let previous = this.lastResolvedId;
+    for (const item of this.items) {
+      if (!item.previousKnown || item.previous !== previous) return true;
+      previous = item.id;
+    }
+    return false;
+  }
+
   discard() {
     this.items = [];
     this.reject('the workspace changed while this session was active.');
   }
 
   finish() {
-    const text = this.preview();
+    const text = this.orderUncertain
+      ? this.items
+          .filter((item) => item.text)
+          .map((item) => `[Live item; order unconfirmed]\n${item.text}`)
+          .join('\n\n')
+      : this.preview();
     this.items = [];
     this.active = false;
     return text;

@@ -21,14 +21,35 @@ text or adding live speech invalidates that alignment, so subtitle exports are d
 exports an empty `segments` list. A new file transcription can supply fresh timestamps. Realtime
 events do not supply segment timestamps, so live transcripts support TXT/JSON only.
 
-Live transcription orders items using predecessor IDs when they are available before an item
-commits. A known predecessor that never arrives or never completes can delay later finals;
-Stop flushes the available text. If ordering metadata arrives only after text was committed,
-or events lack item IDs, the original order cannot always be recovered. Repeated events with
-the same nonempty `event_id` are suppressed within a bounded recent window. Without an event
-ID, a repeated delta is indistinguishable from legitimate repeated text and is appended; a
-final transcription replaces the accumulated draft. The app does not assume IDs are present
-or that retries reuse them, and very old IDs may be forgotten in long sessions.
+Live transcription uses the documented transcription `item_id` to associate deltas, final
+transcripts and failures. An `event_id` identifies an event, not an utterance. Predecessor IDs
+available before commitment order overlapping items as direct predecessor chains; an unresolved
+predecessor can delay later finals. An explicit null predecessor marks the first item; contradictory
+or duplicate first-item metadata fences the session. A failed predecessor is terminal: available
+partial text is retained, successors can continue, and the workspace shows a warning. Stop flushes
+the available text. Conflicting terminal events or ordering metadata that contradicts committed
+order fence the session; they cannot retroactively repair already committed text.
+
+Clearing, editing, or replacing the workspace during a live session fences **all subsequent events
+from that session**, including events for unknown predecessors. Missing or conflicting item IDs,
+malformed tracked events, unexpected transcript fields, contradictory ordering, or resource limits
+also pause acceptance of further events rather than guessing their identity or order. A visible
+message asks you to Stop and Start a new session; the microphone is not automatically stopped by
+this transcript fence. Existing displayed/exported text is preserved, except for the workspace
+change you explicitly made. Text in rejected events is not captured and may need to be repeated in
+the new session.
+
+For one session, the tracker retains at most 1,024 item IDs (including referenced predecessors),
+4,096 event IDs, and 1,000,000 UTF-16 code units each of pending transcript text, resolved item
+text, and text retained for event deduplication. Each item or event ID is limited to 256 code
+units. A data-channel message over 1,100,000 code units is also refused before JSON parsing.
+Reaching a limit fences the session instead of evicting IDs that could still be needed to reject
+late events. Exact repeated transcription delta, completion, or failure events with the same
+nonempty `event_id` are suppressed within the session; conflicting reuse among those events fences
+it. Registration-event IDs are not tracked or compared with transcription-event IDs. Without an
+event ID, a repeated delta is indistinguishable from legitimate repeated text and is appended; a
+final transcript replaces the item's accumulated draft. These rules have synthetic test coverage,
+not live provider qualification.
 
 ## Architecture
 

@@ -144,26 +144,26 @@ const download = (name: string, contents: string, type: string) => {
 
 const extractRealtimeText = (event: Record<string, unknown>) => {
   const type = String(event.type || '');
-  if (!type.includes('transcription') && !type.includes('transcript')) return null;
-
-  const delta = event.delta ?? event.transcript_delta;
-  if (typeof delta === 'string') return { kind: 'partial' as const, text: delta };
-
-  const text = event.transcript ?? event.text ?? event.final_transcript;
-  if (typeof text === 'string') {
-    return {
-      kind: type.includes('delta') ? ('partial' as const) : ('final' as const),
-      text
-    };
+  if (
+    type === 'conversation.item.input_audio_transcription.delta' &&
+    typeof event.delta === 'string' &&
+    event.transcript === undefined &&
+    event.text === undefined &&
+    event.transcript_delta === undefined &&
+    event.final_transcript === undefined
+  ) {
+    return { kind: 'partial' as const, text: event.delta };
   }
-
-  const item = event.item as
-    | { content?: Array<{ transcript?: string; text?: string }> }
-    | undefined;
-  const contentText =
-    item?.content?.map((part) => part.transcript || part.text || '').join('') || '';
-  if (contentText) return { kind: 'final' as const, text: contentText };
-
+  if (
+    type === 'conversation.item.input_audio_transcription.completed' &&
+    typeof event.transcript === 'string' &&
+    event.delta === undefined &&
+    event.text === undefined &&
+    event.transcript_delta === undefined &&
+    event.final_transcript === undefined
+  ) {
+    return { kind: 'final' as const, text: event.transcript };
+  }
   return null;
 };
 
@@ -177,13 +177,14 @@ export function SttApp() {
   const [uploadError, setUploadError] = useState('');
   const [liveState, setLiveState] = useState<LiveState>('idle');
   const [liveError, setLiveError] = useState('');
+  const [trackerNotice, setTrackerNotice] = useState('');
   const [partial, setPartial] = useState('');
   const [transcript, setTranscript] = useState<TranscriptDocument>(emptyTranscript);
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
-  const utterancesRef = useRef(new LiveUtterances());
+  const utterancesRef = useRef(new LiveUtterances(false));
   const liveSessionRef = useRef(0);
   const realtimeRequestRef = useRef<AbortController | null>(null);
   const fallbackRequestRef = useRef<AbortController | null>(null);
@@ -191,8 +192,10 @@ export function SttApp() {
   const discardLiveDraft = useCallback(() => {
     fallbackRequestRef.current?.abort();
     setLiveState((current) => (current === 'fallback-transcribing' ? 'stopped' : current));
-    utterancesRef.current.discard();
+    const tracker = utterancesRef.current;
+    tracker.discard();
     setPartial('');
+    if (tracker.error) setTrackerNotice(tracker.error);
   }, []);
 
   const transcriptText = transcript.text;
@@ -275,6 +278,7 @@ export function SttApp() {
       const request = new AbortController();
       fallbackRequestRef.current = request;
       const chunks: Blob[] = [];
+      const fallbackTracker = utterancesRef.current;
       const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
       const isCurrent = () => fallbackRequestRef.current === request && !request.signal.aborted;
       recorder.ondataavailable = (event) => {
@@ -288,11 +292,16 @@ export function SttApp() {
           const document = await transcribeFallbackRecording(blob, request.signal);
           if (!isCurrent()) return;
           setTranscript(document);
-          utterancesRef.current.discard();
+          if (utterancesRef.current === fallbackTracker) fallbackTracker.finish();
           setPartial('');
           setLiveState('stopped');
         } catch (error) {
           if (!isCurrent()) return;
+          if (utterancesRef.current === fallbackTracker) {
+            const remaining = fallbackTracker.finish();
+            if (remaining.trim()) applyFinalText(remaining);
+            setPartial('');
+          }
           setLiveError(error instanceof Error ? error.message : 'Fallback transcription failed.');
           setLiveState('error');
         } finally {
@@ -305,7 +314,7 @@ export function SttApp() {
       setLiveError(`${reason} Recording locally in this tab and transcribing after Stop.`);
       setLiveState('fallback-recording');
     },
-    [transcribeFallbackRecording]
+    [applyFinalText, transcribeFallbackRecording]
   );
 
   const startLive = useCallback(async () => {
@@ -324,6 +333,7 @@ export function SttApp() {
     const session = ++liveSessionRef.current;
     setLiveError('');
     utterancesRef.current = new LiveUtterances();
+    setTrackerNotice('');
     setPartial('');
     setLiveState('requesting-mic');
 
@@ -355,48 +365,163 @@ export function SttApp() {
       const channel = pc.createDataChannel('oai-events');
       channel.onmessage = (message) => {
         if (session !== liveSessionRef.current) return;
+        const tracker = utterancesRef.current;
         try {
-          const parsed = JSON.parse(message.data as string) as Record<string, unknown>;
+          if (typeof message.data !== 'string' || message.data.length > 1_100_000) {
+            throw new Error('Malformed realtime event');
+          }
+          const raw: unknown = JSON.parse(message.data);
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            throw new Error('Malformed realtime event');
+          }
+          const parsed = raw as Record<string, unknown>;
           const item =
             parsed.item && typeof parsed.item === 'object'
               ? (parsed.item as Record<string, unknown>)
               : undefined;
-          const id = parsed.item_id ?? item?.id;
           const type = typeof parsed.type === 'string' ? parsed.type : '';
+          if (!type) throw new Error('Malformed realtime event');
+          const content = Array.isArray(item?.content) ? item.content : [];
+          const isCreated = type === 'conversation.item.created';
+          const isAudioBufferEvent = [
+            'input_audio_buffer.speech_started',
+            'input_audio_buffer.speech_stopped',
+            'input_audio_buffer.committed'
+          ].includes(type);
+          const isTranscriptionEvent = type.startsWith(
+            'conversation.item.input_audio_transcription.'
+          );
+          const hasTextFields = [
+            'delta',
+            'transcript',
+            'text',
+            'transcript_delta',
+            'final_transcript'
+          ].some((key) => parsed[key] !== undefined);
+          const pendingValues: unknown[] = [parsed];
+          let hasUnexpectedTranscript = false;
+          while (pendingValues.length && !hasUnexpectedTranscript) {
+            const value = pendingValues.pop();
+            if (!value || typeof value !== 'object') continue;
+            for (const [key, child] of Object.entries(value)) {
+              const isExpectedTranscript =
+                value === parsed &&
+                key === 'transcript' &&
+                type === 'conversation.item.input_audio_transcription.completed';
+              if (
+                ['transcript', 'transcript_delta', 'final_transcript'].includes(key) &&
+                child !== undefined &&
+                child !== null &&
+                child !== '' &&
+                !isExpectedTranscript
+              ) {
+                hasUnexpectedTranscript = true;
+                break;
+              }
+              if (child && typeof child === 'object') pendingValues.push(child);
+            }
+          }
+          const malformedContent =
+            isCreated &&
+            item?.content !== undefined &&
+            item.content !== null &&
+            !Array.isArray(item.content);
+          const hasUnexpectedContent =
+            isCreated &&
+            content.some((part: unknown) => {
+              if (!part || typeof part !== 'object' || Array.isArray(part)) return true;
+              const entry = part as Record<string, unknown>;
+              const isText = ['input_text', 'text', 'output_text'].includes(String(entry.type));
+              return (
+                (entry.delta !== undefined && entry.delta !== null && entry.delta !== '') ||
+                (entry.text !== undefined &&
+                  entry.text !== null &&
+                  (typeof entry.text !== 'string' || (!isText && entry.text !== '')))
+              );
+            });
           let committed = '';
-          if (typeof id === 'string' && id.trim()) {
-            if (type === 'conversation.item.created' && item) {
-              const content = Array.isArray(item.content) ? item.content : [];
-              const isAudio = content.some(
+          if (
+            ((isTranscriptionEvent || isAudioBufferEvent) && parsed.item !== undefined) ||
+            ((isCreated || isAudioBufferEvent) && hasTextFields) ||
+            hasUnexpectedTranscript ||
+            malformedContent ||
+            hasUnexpectedContent
+          ) {
+            tracker.reject('a realtime event contained unsupported transcription text.');
+          } else if (
+            parsed.item_id !== undefined &&
+            item?.id !== undefined &&
+            parsed.item_id !== item.id
+          ) {
+            tracker.reject('an event contains conflicting item IDs.');
+          } else if (isCreated) {
+            const isAudio = content.some(
+              (part: unknown) =>
+                part &&
+                typeof part === 'object' &&
+                (part as Record<string, unknown>).type === 'input_audio'
+            );
+            const isNonAudio =
+              content.length > 0 &&
+              content.every(
                 (part: unknown) =>
                   part &&
                   typeof part === 'object' &&
-                  (part as Record<string, unknown>).type === 'input_audio'
+                  ['input_text', 'text', 'output_text'].includes(
+                    String((part as Record<string, unknown>).type)
+                  )
               );
-              // Only classify an item when its content is present; incomplete events remain unknown.
-              if (Array.isArray(item.content)) {
-                committed = isAudio
-                  ? utterancesRef.current.register(id, parsed.previous_item_id)
-                  : utterancesRef.current.skip(id, parsed.previous_item_id);
-              }
-            } else if (
-              type === 'input_audio_buffer.speech_started' ||
-              type === 'input_audio_buffer.speech_stopped' ||
-              type === 'input_audio_buffer.committed'
-            ) {
-              committed = utterancesRef.current.register(id, parsed.previous_item_id);
-            }
+            committed = isNonAudio
+              ? tracker.skip(item?.id, parsed.previous_item_id)
+              : tracker.register(item?.id, parsed.previous_item_id, isAudio);
+          } else if (isAudioBufferEvent) {
+            committed = tracker.register(parsed.item_id, parsed.previous_item_id, true);
           }
           if (committed) applyFinalText(committed);
-          const update = extractRealtimeText(parsed);
-          if (update) {
-            committed = utterancesRef.current.update(id, update.kind, update.text, parsed.event_id);
-            if (committed) applyFinalText(committed);
+          if (type === 'conversation.item.input_audio_transcription.failed') {
+            if (
+              parsed.delta !== undefined ||
+              parsed.transcript !== undefined ||
+              parsed.text !== undefined ||
+              parsed.transcript_delta !== undefined ||
+              parsed.final_transcript !== undefined
+            ) {
+              tracker.reject('a transcription failure event contained unexpected text.');
+            } else {
+              committed = tracker.fail(parsed.item_id, parsed.previous_item_id, parsed.event_id);
+              if (committed) applyFinalText(committed);
+              if (!tracker.error) {
+                setTrackerNotice(
+                  'A live audio item failed transcription; any partial text may be incomplete.'
+                );
+              }
+            }
+          } else {
+            const update = extractRealtimeText(parsed);
+            if (update) {
+              committed = tracker.update(
+                parsed.item_id,
+                update.kind,
+                update.text,
+                parsed.event_id,
+                parsed.previous_item_id
+              );
+              if (committed) applyFinalText(committed);
+            } else if (
+              isTranscriptionEvent ||
+              parsed.transcript !== undefined ||
+              parsed.transcript_delta !== undefined ||
+              parsed.final_transcript !== undefined ||
+              ((type.includes('transcription') || type.includes('transcript')) && hasTextFields)
+            ) {
+              tracker.reject('a transcription event type or text was unsupported or malformed.');
+            }
           }
-          setPartial(utterancesRef.current.preview());
         } catch {
-          // Realtime data channel can include events not needed by this UI.
+          tracker.reject('a realtime event was malformed or too large.');
         }
+        if (tracker.error) setTrackerNotice(tracker.error);
+        setPartial(tracker.preview());
       };
 
       stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
@@ -450,6 +575,9 @@ export function SttApp() {
         `${message} Check OpenAI billing/model access and restart the app after updating server-side secrets.`
       );
       setLiveState('error');
+      const remaining = utterancesRef.current.finish();
+      if (remaining.trim()) applyFinalText(remaining);
+      setPartial('');
       stopMedia();
     }
   }, [applyFinalText, language, startFallbackRecorder, stopMedia]);
@@ -737,6 +865,11 @@ export function SttApp() {
               discardLiveDraft();
             }}
           />
+          {trackerNotice ? (
+            <p className="error" role="alert">
+              {trackerNotice}
+            </p>
+          ) : null}
 
           <div className="export-row" aria-label="Export transcript">
             <button

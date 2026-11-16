@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { LiveUtterances, joinTranscriptText } from '@/src/lib/liveTranscript';
 
+const contentWarning = '[Live audio content identity unconfirmed; speech may be missing]';
+
 class Capture {
   tracker = new LiveUtterances();
   committed = '';
@@ -158,7 +160,10 @@ describe('LiveUtterances content identity', () => {
     expect(capture.tracker.error).toBe('');
     capture.update('item', 'final', 'accepted', 'event-id', 1);
     expect(capture.tracker.error).not.toBe('');
-    expect(capture.finish()).toBe('accepted');
+    capture.update('item', 'final', 'rejected speech', 'after-fence', 0);
+    const retained = capture.finish();
+    expect(retained).toBe(`accepted ${contentWarning}`);
+    expect(retained).not.toContain('rejected speech');
   });
 
   it('distinguishes equal finals for genuine item IDs and reconciles late predecessors', () => {

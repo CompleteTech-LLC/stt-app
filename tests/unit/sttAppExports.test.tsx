@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SttApp } from '@/components/stt-app';
 import type { TranscriptDocument } from '@/src/lib/transcriptExport';
 
+const contentWarning = '[Live audio content identity unconfirmed; speech may be missing]';
+
 const uploadedTranscript: TranscriptDocument = {
   text: 'Original transcript.',
   language: 'en',
@@ -34,6 +36,18 @@ async function readDownload(name: string) {
     reader.onerror = reject;
     reader.readAsText(downloads.at(-1)!);
   });
+}
+
+async function expectWarningExports(text: string) {
+  for (const name of ['Copy transcript', 'TXT', 'JSON']) {
+    expect(getExportButton(name)).toBeEnabled();
+  }
+  fireEvent.click(getExportButton('Copy transcript'));
+  expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(text);
+  expect(await readDownload('TXT')).toBe(`${text}\n`);
+  expect(JSON.parse(await readDownload('JSON'))).toMatchObject({ text, segments: [] });
+  expect(getExportButton('SRT')).toBeDisabled();
+  expect(getExportButton('VTT')).toBeDisabled();
 }
 
 async function uploadTranscript(document: TranscriptDocument = uploadedTranscript) {
@@ -1203,7 +1217,15 @@ describe('identified live items', () => {
       transcript: 'accepted'
     });
     expect(screen.getByText(/conflicting content index/)).toBeVisible();
-    expect(await readDownload('TXT')).toBe('accepted\n');
+    emitTranscript('completed', 'not accepted', 'A');
+    const expected = `accepted ${contentWarning}`;
+    const transcript = screen.getByLabelText('Transcript text') as HTMLTextAreaElement;
+    expect(transcript).toHaveValue(expected);
+    expect(transcript.value).not.toContain('not accepted');
+    await expectWarningExports(expected);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(transcript).toHaveValue(expected);
+    await expectWarningExports(expected);
   });
 
   it.each(['reference first', 'final first'] as const)(
@@ -1231,10 +1253,13 @@ describe('identified live items', () => {
       emitEvent(order === 'reference first' ? created : final);
       emitEvent(order === 'reference first' ? final : created);
       expect(screen.getByText(/conflicting content index/)).toBeVisible();
+      emitTranscript('completed', 'not accepted', 'A');
       fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
-      expect(screen.getByLabelText('Transcript text')).toHaveValue(
-        order === 'reference first' ? '' : 'same'
-      );
+      const expected = order === 'reference first' ? contentWarning : `same ${contentWarning}`;
+      const transcript = screen.getByLabelText('Transcript text') as HTMLTextAreaElement;
+      expect(transcript).toHaveValue(expected);
+      expect(transcript.value).not.toContain('not accepted');
+      await expectWarningExports(expected);
     }
   );
 
@@ -1757,8 +1782,27 @@ describe('identified live items', () => {
     emitTranscript('delta', 'saved', 'saved');
     emitEvent(event);
     emitTranscript('completed', 'not accepted', 'saved');
-    expect(screen.getByLabelText('Transcript text')).toHaveValue('saved');
+    const multipleAudioParts =
+      event.type === 'conversation.item.created' &&
+      'item' in event &&
+      event.item &&
+      'content' in event.item &&
+      Array.isArray(event.item.content) &&
+      event.item.content.length > 1 &&
+      event.item.content.every(
+        (part: unknown) =>
+          part !== null && typeof part === 'object' && 'type' in part && part.type === 'input_audio'
+      );
+    const transcript = screen.getByLabelText('Transcript text');
+    expect(transcript).toHaveValue(multipleAudioParts ? `saved\n\n${contentWarning}` : 'saved');
     expect(screen.getByRole('alert')).toHaveTextContent(/Live transcription paused/);
+    if (multipleAudioParts) {
+      expect((transcript as HTMLTextAreaElement).value).not.toContain('unexpected text');
+      expect((transcript as HTMLTextAreaElement).value).not.toContain('not accepted');
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      expect(transcript).toHaveValue(`saved\n\n${contentWarning}`);
+      await expectWarningExports(`saved\n\n${contentWarning}`);
+    }
   });
 
   it.each(['not-json', 'x'.repeat(1_100_001)])(

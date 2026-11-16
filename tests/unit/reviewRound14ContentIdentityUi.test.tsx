@@ -12,6 +12,7 @@ const answerSdp = 'v=0\r\ns=round14 synthetic answer\r\n';
 const realtimeModel = 'gpt-realtime-whisper';
 const seed = 'accepted seed';
 const unsafeText = 'BAD-INDEX-SPEECH';
+const contentWarning = '[Live audio content identity unconfirmed; speech may be missing]';
 const uncertaintyLabel =
   /unconfirmed|uncertain|unsupported|invalid|malformed|conflict|incomplete|unverified|ambiguous|unknown|not (?:verified|confirmed|established)|missing|omitt/i;
 
@@ -263,8 +264,12 @@ async function download(kind: ExportKind) {
   });
 }
 
-async function checkExports(requireEnabled: boolean) {
-  const current = displayed();
+async function checkExports(
+  requireEnabled: boolean,
+  expectedText?: string,
+  expectedModel = realtimeModel
+) {
+  const current = expectedText ?? displayed();
   const [copy, txt, json] = exportButtons();
   if (requireEnabled) [copy, txt, json].forEach((button) => expect(button).toBeEnabled());
   if (!copy.hasAttribute('disabled')) {
@@ -283,7 +288,7 @@ async function checkExports(requireEnabled: boolean) {
     };
     expect(result.text).toBe(current);
     expect(result.segments).toEqual([]);
-    if (requireEnabled) expect(result.model).toBe(realtimeModel);
+    if (requireEnabled) expect(result.model).toBe(expectedModel);
   }
 }
 
@@ -653,9 +658,52 @@ describe('content-part identity through the realtime UI', () => {
     expect(displayed()).toBe('accepted');
     emit(channel, transcription('final', 'item', 'same-id', 1, 'accepted', null));
     expect(strictIndexWarning()).toBe(true);
-    expect(displayed()).toBe('accepted');
+    emit(channel, transcription('final', 'item', 'after-fence', 0, unsafeText, null));
+    expect(displayed()).toBe(`accepted ${contentWarning}`);
+    expect(displayed()).not.toContain(unsafeText);
+    await checkExports(true);
     stop(0);
-    await checkExports(false);
+    expect(displayed()).toBe(`accepted ${contentWarning}`);
+    await checkExports(true);
+  });
+
+  it('retains the content warning through edits and later sessions until Clear', async () => {
+    render(<SttApp />);
+    const channel = await start();
+    emit(channel, transcription('final', 'item', 'accepted-final', 0, 'accepted', null));
+    emit(channel, transcription('final', 'item', 'bad-index', 1, unsafeText, null));
+    expect(strictIndexWarning()).toBe(true);
+    expect(displayed()).toBe(`accepted ${contentWarning}`);
+    expect(displayed()).not.toContain(unsafeText);
+    stop(0);
+    expect(displayed()).toBe(`accepted ${contentWarning}`);
+    await checkExports(true);
+
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: 'edited accepted' }
+    });
+    expect(displayed()).toBe('edited accepted');
+    expect(screen.getByRole('button', { name: 'SRT' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'VTT' })).toBeDisabled();
+    await checkExports(true, `edited accepted\n\n${contentWarning}`, 'edited');
+
+    const laterChannel = await start();
+    emit(laterChannel, transcription('final', 'later', 'later-final', 0, 'later speech', null));
+    expect(displayed()).toBe('edited accepted later speech');
+    expect(displayed()).not.toContain(unsafeText);
+    await checkExports(true, `edited accepted later speech\n\n${contentWarning}`, 'mixed');
+    stop(1);
+    expect(displayed()).toBe('edited accepted later speech');
+    await checkExports(true, `edited accepted later speech\n\n${contentWarning}`, 'mixed');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(displayed()).toBe('');
+    exportButtons().forEach((button) => expect(button).toBeDisabled());
+    fireEvent.change(screen.getByLabelText('Transcript text'), {
+      target: { value: 'clean after clear' }
+    });
+    expect(displayed()).toBe('clean after clear');
+    await checkExports(true, 'clean after clear', 'edited');
   });
 
   it('keeps old channel callbacks from changing a new session or releasing its pending turn', async () => {

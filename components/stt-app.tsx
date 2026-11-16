@@ -202,6 +202,7 @@ const extractRealtimeText = (event: Record<string, unknown>) => {
 export function SttApp() {
   const [mode, setMode] = useState<Mode>('live');
   const [language, setLanguage] = useState('en');
+  const [liveLanguage, setLiveLanguage] = useState(language);
   const [fileModel, setFileModel] = useState<FileSttModel>(sttModels.fileDefault);
   const [prompt, setPrompt] = useState('');
   const [file, setFile] = useState<File | null>(null);
@@ -232,12 +233,7 @@ export function SttApp() {
 
   const transcriptText = transcript.text;
   const displayedTranscriptText = joinTranscriptText(transcriptText, partial);
-  const exportDocument = appendDocumentText(
-    transcript,
-    partial,
-    sttModels.realtime,
-    liveLanguageRef.current
-  );
+  const exportDocument = appendDocumentText(transcript, partial, sttModels.realtime, liveLanguage);
   const canExportTimed = !orderUncertain && hasTimestamps(exportDocument);
   const liveStatus = liveStatusCopy[liveState];
 
@@ -247,12 +243,12 @@ export function SttApp() {
     []
   );
 
-  const applyFinalText = useCallback(
-    (text: string) => {
-      setTranscript((current) => appendDocumentText(current, text, sttModels.realtime, language));
-    },
-    [language]
-  );
+  const applyFinalText = useCallback((text: string) => {
+    const sessionLanguage = liveLanguageRef.current;
+    setTranscript((current) =>
+      appendDocumentText(current, text, sttModels.realtime, sessionLanguage)
+    );
+  }, []);
 
   const retirePeer = useCallback(() => {
     const channel = dataChannelRef.current;
@@ -476,28 +472,33 @@ export function SttApp() {
     [applyFinalText, language, stopMedia, transcribeFallbackRecording]
   );
 
+  const cancelFallbackRecorder = useCallback(() => {
+    fallbackRequestRef.current?.abort();
+    fallbackRequestRef.current = null;
+    fallbackStopRequestedRef.current = false;
+    pendingFallbackRef.current = null;
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      recorder.onerror = null;
+      stopRecorder(recorder);
+    }
+  }, []);
+
   const startLive = useCallback(async () => {
     cancelUpload();
     const discardedRecording = Boolean(
       fallbackRequestRef.current && (recorderRef.current || pendingFallbackRef.current)
     );
-    fallbackRequestRef.current?.abort();
-    fallbackRequestRef.current = null;
-    fallbackStopRequestedRef.current = false;
-    pendingFallbackRef.current = null;
-    const oldRecorder = recorderRef.current;
-    recorderRef.current = null;
-    if (oldRecorder) {
-      oldRecorder.ondataavailable = null;
-      oldRecorder.onstop = null;
-      oldRecorder.onerror = null;
-      stopRecorder(oldRecorder);
-    }
+    cancelFallbackRecorder();
     const remaining = utterancesRef.current.finish();
     if (remaining) applyFinalText(remaining);
     stopMedia();
     const session = ++liveSessionRef.current;
     liveLanguageRef.current = language;
+    setLiveLanguage(language);
     setLiveError('');
     utterancesRef.current = new LiveUtterances();
     setTrackerNotice(
@@ -774,16 +775,7 @@ export function SttApp() {
           startFallbackRecorder(streamRef.current, session, message);
           return;
         } catch (fallbackError) {
-          fallbackRequestRef.current?.abort();
-          fallbackRequestRef.current = null;
-          const recorder = recorderRef.current;
-          recorderRef.current = null;
-          if (recorder) {
-            recorder.ondataavailable = null;
-            recorder.onstop = null;
-            recorder.onerror = null;
-            stopRecorder(recorder);
-          }
+          cancelFallbackRecorder();
           const remaining = utterancesRef.current.finish();
           if (remaining) applyFinalText(remaining);
           setPartial('');
@@ -808,7 +800,15 @@ export function SttApp() {
       setOrderUncertain(false);
       stopMedia();
     }
-  }, [applyFinalText, cancelUpload, language, retirePeer, startFallbackRecorder, stopMedia]);
+  }, [
+    applyFinalText,
+    cancelFallbackRecorder,
+    cancelUpload,
+    language,
+    retirePeer,
+    startFallbackRecorder,
+    stopMedia
+  ]);
 
   const stopLive = useCallback(() => {
     if (recorderRef.current) {

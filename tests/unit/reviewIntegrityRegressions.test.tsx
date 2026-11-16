@@ -131,7 +131,7 @@ async function download(name: 'TXT' | 'JSON') {
   });
 }
 
-async function upload(transcript: Record<string, unknown>) {
+async function upload(transcript: Record<string, unknown> & { text: string }) {
   fileResponses.push(() => Promise.resolve(response(transcript)));
   fireEvent.click(screen.getByRole('tab', { name: 'File Upload' }));
   fireEvent.change(screen.getByLabelText(/Audio and video files accepted/), {
@@ -281,29 +281,32 @@ describe('late ordering and contradictory identity', () => {
     final(peer, 'A', 'first');
     emit(peer, { type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
     expect(screen.getByLabelText('Transcript text')).toHaveValue('first second');
+    expect(screen.getByText(/Live item order is unconfirmed/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Copy transcript' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'TXT' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'JSON' })).toBeDisabled();
+    emit(peer, { type: 'input_audio_buffer.committed', item_id: 'A', previous_item_id: null });
+    expect(screen.queryByText(/Live item order is unconfirmed/)).not.toBeInTheDocument();
+    await expectTextExports('first second');
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     await expectTextExports('first second');
   });
 
-  it('makes unresolved order explicit through Stop and any enabled export', async () => {
+  it('preserves both items with explicit order labels through Stop and exports', async () => {
     render(<SttApp />);
     const peer = await startLive();
     final(peer, 'B', 'second');
     final(peer, 'A', 'first');
+    emit(peer, { type: 'input_audio_buffer.committed', item_id: 'B', previous_item_id: 'A' });
+    expect(screen.getByLabelText('Transcript text')).toHaveValue('first second');
+    expect(screen.getByText(/Live item order is unconfirmed/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Copy transcript' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'TXT' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'JSON' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
-    expect(screen.getByText(/ambig|uncertain|order.{0,30}(unknown|not known)/i)).toBeVisible();
-    const visibleText = `${(screen.getByLabelText('Transcript text') as HTMLTextAreaElement).value}\n${document.body.textContent}`;
-    expect(visibleText).toContain('first');
-    expect(visibleText).toContain('second');
-    for (const format of ['TXT', 'JSON'] as const) {
-      const button = screen.getByRole('button', { name: format });
-      if (!button.hasAttribute('disabled')) {
-        const content = await download(format);
-        expect(content).toMatch(/ambig|uncertain|order.{0,30}(unknown|not known)/i);
-        expect(content).toContain('first');
-        expect(content).toContain('second');
-      }
-    }
+    await expectTextExports(
+      '[Live item; order unconfirmed]\nfirst\n\n[Live item; order unconfirmed]\nsecond'
+    );
   });
 
   it.each(['pending audio first', 'resolved audio first', 'non-audio first'] as const)(
@@ -348,8 +351,14 @@ describe('late ordering and contradictory identity', () => {
       delta: 'reused'
     });
     final(peer, 'A', 'must not be accepted', null);
-    expect(screen.getByRole('alert')).toHaveTextContent(/paused|event|reused/i);
+    expect(
+      screen.getByText(
+        'Live transcription paused: an event ID was reused with different identity or content. Stop and Start a new session.',
+        { selector: '[role="alert"]' }
+      )
+    ).toBeVisible();
     expect(screen.getByLabelText('Transcript text')).toHaveValue('kept');
+    expect(peer.close).not.toHaveBeenCalled();
   });
 
   it('still fences instead of evicting item identity after the documented item limit', async () => {
@@ -360,9 +369,15 @@ describe('late ordering and contradictory identity', () => {
         peer.channel.emit({ type: 'input_audio_buffer.speech_started', item_id: `item-${index}` });
       }
     });
-    expect(screen.getByRole('alert')).toHaveTextContent(/paused|limit/i);
+    expect(
+      screen.getByText(
+        'Live transcription paused: the session item limit was reached. Stop and Start a new session.',
+        { selector: '[role="alert"]' }
+      )
+    ).toBeVisible();
     final(peer, 'item-0', 'must not be accepted', null);
     expect(screen.getByLabelText('Transcript text')).toHaveValue('');
+    expect(peer.close).not.toHaveBeenCalled();
   });
 });
 
@@ -424,6 +439,29 @@ describe('timestamp and provenance integrity', () => {
     const json = await expectTextExports('Original uploaded text. Live addition.');
     expect(json.model).not.toBe('gpt-4o-mini-transcribe');
     expect(json.model).not.toBe('gpt-realtime-whisper');
+  });
+
+  it('uses the language captured at each live session start for drafts and final text', async () => {
+    render(<SttApp />);
+    const firstPeer = await startLive();
+    partial(firstPeer, 'english', 'English draft', null);
+    fireEvent.change(screen.getByLabelText('Language hint'), { target: { value: 'es' } });
+    expect((await expectTextExports('English draft')).language).toBe('en');
+    final(firstPeer, 'english', 'English final', null);
+    expect((await expectTextExports('English final')).language).toBe('en');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect((await expectTextExports('English final')).language).toBe('en');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    realtimeResponses.push(() => Promise.resolve(answer()));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Listening');
+    const secondPeer = peers.at(-1)!;
+    partial(secondPeer, 'spanish', 'Spanish draft', null);
+    fireEvent.change(screen.getByLabelText('Language hint'), { target: { value: 'fr' } });
+    expect((await expectTextExports('Spanish draft')).language).toBe('es');
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect((await expectTextExports('Spanish draft')).language).toBe('es');
   });
 
   it('preserves exact leading and multiline whitespace during draft, final, and Stop', async () => {

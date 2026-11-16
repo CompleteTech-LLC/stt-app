@@ -53,7 +53,15 @@ export const toAppError = (error: unknown): AppError => {
   }
 
   if (error instanceof Error) {
-    if (error.name === 'AbortError' || error.message.toLowerCase().includes('timeout')) {
+    const upstream = getOpenAIErrorDetails(error);
+    if (
+      upstream.status !== 401 &&
+      (error.name === 'AbortError' ||
+        error.name === 'TimeoutError' ||
+        error.name === 'APIConnectionTimeoutError' ||
+        error.message.toLowerCase().includes('timeout') ||
+        /\btimed[\s-]+out\b/i.test(error.message))
+    ) {
       return new AppError(
         'TIMEOUT',
         'The transcription request timed out. Try a shorter file.',
@@ -70,7 +78,6 @@ export const toAppError = (error: unknown): AppError => {
       );
     }
 
-    const upstream = getOpenAIErrorDetails(error);
     const maybeStatus = upstream.status;
     if (maybeStatus && maybeStatus >= 400) {
       return new AppError(
@@ -83,7 +90,7 @@ export const toAppError = (error: unknown): AppError => {
         maybeStatus === 401 ? 503 : 502,
         maybeStatus >= 500,
         maybeStatus,
-        upstream.code
+        maybeStatus === 401 ? undefined : upstream.code
       );
     }
   }

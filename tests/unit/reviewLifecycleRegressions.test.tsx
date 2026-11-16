@@ -349,10 +349,20 @@ describe('fallback media ownership', () => {
       render(<SttApp />);
       const recorder = await beginFallback();
       const peer = peers[0];
-      await stopEvent(recorder);
-      expect(media.stop).toHaveBeenCalled();
-      expect(peer.close).toHaveBeenCalled();
+      act(() => {
+        recorder.emitStop();
+        expect(media.stop).toHaveBeenCalledTimes(1);
+        expect(peer.close).toHaveBeenCalledTimes(1);
+        expect(fileCalls()).toHaveLength(0);
+      });
+      expect(screen.getByText('Recording interrupted')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Transcribe recording' })).toBeEnabled();
+      expect(fileCalls()).toHaveLength(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Transcribe recording' }));
       expect(fileCalls()).toHaveLength(1);
+      expect(screen.getByText('Transcribing recording')).toBeInTheDocument();
+      expect(media.stop).toHaveBeenCalledTimes(1);
+      expect(peer.close).toHaveBeenCalledTimes(1);
       if (outcome === 'failed') {
         await act(async () => {
           pending.reject(new Error('synthetic transcription failure'));
@@ -360,6 +370,9 @@ describe('fallback media ownership', () => {
         });
         expect(await screen.findByText(/synthetic transcription failure/)).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
+        expect(media.stop).toHaveBeenCalledTimes(1);
+        expect(peer.close).toHaveBeenCalledTimes(1);
+        expect(fileCalls()).toHaveLength(1);
       }
     }
   );
@@ -464,6 +477,13 @@ describe('fallback media ownership', () => {
       ).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
       expect(fileCalls()).toHaveLength(0);
+      if (fault === 'start') {
+        expect(recorders[0].ondataavailable).toBeNull();
+        expect(recorders[0].onstop).toBeNull();
+        expect(recorders[0].onerror).toBeNull();
+        await stopEvent(recorders[0]);
+        expect(fileCalls()).toHaveLength(0);
+      }
       recorderFault = 'none';
       realtimeResponses.push(() => Promise.resolve(answer()));
       await beginLive('Retry');

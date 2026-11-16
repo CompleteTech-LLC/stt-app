@@ -212,7 +212,7 @@ describe('ordered live utterances', () => {
     expect(items.error).toBe('');
   });
 
-  it('rejects conflicting successors or already-impossible predecessor order', () => {
+  it('rejects conflicting successors, including after the first successor was committed', () => {
     const siblings = new LiveUtterances();
     siblings.register('B', 'A');
     siblings.update('B', 'partial', 'saved');
@@ -221,11 +221,15 @@ describe('ordered live utterances', () => {
     expect(siblings.preview()).toBe('saved');
 
     const late = new LiveUtterances();
-    late.update('A', 'final', 'first', undefined, null);
-    late.update('X', 'final', 'other', undefined, 'A');
-    late.register('B', 'A');
-    expect(late.error).toMatch(/committed item order/);
+    expect(late.update('A', 'final', 'first', undefined, null)).toBe('first');
+    expect(late.update('X', 'final', 'other', undefined, 'A')).toBe('other');
+    expect(late.register('B', 'A')).toBe('');
+    expect(late.error).toBe(
+      'Live transcription paused: multiple items claim the same predecessor. Stop and Start a new session.'
+    );
     expect(late.update('B', 'final', 'second')).toBe('');
+    expect(late.preview()).toBe('');
+    expect(late.finish()).toBe('');
   });
 
   it('fences conflicting terminal events but deduplicates exact final text', () => {
